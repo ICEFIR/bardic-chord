@@ -1,0 +1,83 @@
+name: CI
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    runs-on: ubuntu-24.04
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Install Linux build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libasound2-dev \
+            libdbus-1-dev \
+            libegl1-mesa-dev \
+            libfontconfig1-dev \
+            libgles2-mesa-dev \
+            libpulse-dev \
+            libwayland-dev \
+            libx11-dev \
+            libx11-xcb-dev \
+            libxkbcommon-dev \
+            libxkbcommon-x11-dev \
+            pkg-config \
+            python3-pip
+
+      - name: Install stable Rust target
+        run: rustup target add x86_64-pc-windows-gnu
+
+      - name: Install cargo-zigbuild and Zig
+        run: |
+          python3 -m pip install --user cargo-zigbuild
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
+      - name: Show toolchain versions
+        run: |
+          rustc --version
+          cargo --version
+          cargo zigbuild --version
+          zig version
+
+      - name: Check formatting
+        run: cargo fmt --all --check
+
+      - name: Check workspace
+        run: cargo check --workspace
+
+      - name: Run desktop unit tests
+        run: cargo test -p bardic-chord --lib
+
+      - name: Build Linux release archive
+        run: cargo xtask release --target linux
+
+      - name: Build Windows release archive
+        run: cargo xtask release --target windows
+
+      - name: Upload build artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: bardic-chord-ci-${{ github.sha }}
+          path: |
+            dist/*.tar.xz
+            dist/*.tar.xz.sha256
+            dist/*.zip
+            dist/*.zip.sha256
+          if-no-files-found: error
+          retention-days: 14

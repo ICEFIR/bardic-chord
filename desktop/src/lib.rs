@@ -6,6 +6,7 @@ use backend::{
     HealthTile, Settings, DEFAULT_AUDIO_OUTPUT_NAME, DEFAULT_CAPTURE_TARGET,
     DISCORD_INVITE_PERMISSIONS,
 };
+#[cfg(target_os = "linux")]
 use directories::BaseDirs;
 use slint::{Model, ModelRc, SharedString, VecModel};
 use std::{
@@ -20,7 +21,9 @@ use std::{
 };
 use tokio::runtime::{Builder, Handle, Runtime};
 use tokio::time::{sleep, Duration};
-use tracing::{info, warn};
+use tracing::info;
+#[cfg(target_os = "linux")]
+use tracing::warn;
 
 slint::include_modules!();
 
@@ -28,6 +31,7 @@ const DISCORD_INVITE_POLL_INTERVAL: Duration = Duration::from_secs(5);
 const DISCORD_INVITE_POLL_ATTEMPTS: u32 = 18;
 const STATUS_POLL_INTERVAL: Duration = Duration::from_secs(5);
 const LOG_MAX_BYTES: u64 = 1_048_576;
+#[cfg(target_os = "linux")]
 const LINUX_APP_ID: &str = "bardic-chord";
 const LOCAL_STATE_DIR: &str = ".bardic-chord";
 

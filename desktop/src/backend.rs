@@ -19,16 +19,24 @@ use songbird::{
     EventContext as SongbirdEventContext, EventHandler as SongbirdEventHandler, SerenityInit,
     Songbird, TrackEvent,
 };
+#[cfg(any(target_os = "linux", test))]
+use std::collections::HashMap;
+#[cfg(target_os = "linux")]
+use std::process::Stdio;
+#[cfg(target_os = "windows")]
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::{
-    collections::{HashMap, VecDeque},
+    collections::VecDeque,
     env, fs, io, mem,
     path::PathBuf,
-    process::Stdio,
     sync::{Arc, Condvar, Mutex as StdMutex},
 };
+#[cfg(target_os = "linux")]
+use tokio::io::AsyncReadExt;
+#[cfg(target_os = "linux")]
+use tokio::process::Child;
 use tokio::{
-    io::AsyncReadExt,
-    process::{Child, Command},
+    process::Command,
     sync::{oneshot, Mutex},
     task::JoinHandle,
     time::{timeout, Duration, Instant},
@@ -36,8 +44,6 @@ use tokio::{
 use tracing::{debug, error, info, warn};
 #[cfg(target_os = "windows")]
 use wasapi::{AudioClient, Direction, SampleType, StreamMode, WaveFormat};
-#[cfg(target_os = "windows")]
-use std::sync::atomic::{AtomicBool, Ordering};
 
 const DISCORD_API_BASE: &str = "https://discord.com/api/v10";
 pub const DISCORD_INVITE_PERMISSIONS: &str = "3146752";
@@ -340,11 +346,9 @@ impl io::Read for EmittedSink {
         while bytes_written + (sample_size - 1) < buffer.len() {
             if state.frames.is_empty() && bytes_written == 0 {
                 let wait = available
-                    .wait_timeout_while(
-                        state,
-                        Duration::from_millis(40),
-                        |state| state.frames.len() < prefill_target,
-                    )
+                    .wait_timeout_while(state, Duration::from_millis(40), |state| {
+                        state.frames.len() < prefill_target
+                    })
                     .expect("emitted sink wait poisoned");
                 state = wait.0;
             }
@@ -378,6 +382,7 @@ impl songbird::input::core::io::MediaSource for EmittedSink {
     }
 }
 
+#[cfg(target_os = "linux")]
 struct LinuxAudioOutputRuntime {
     module_id: String,
     sink_name: String,
@@ -964,7 +969,7 @@ impl Backend {
             let report = build_audio_output_report(
                 true,
                 Some(output_name),
-                Some(capture_target),
+                Some(capture_target.clone()),
                 platform_name().into(),
                 Some(format_now()),
                 format!(
@@ -1085,8 +1090,14 @@ impl Backend {
 
         let route = self.validate_discord_setup(settings.clone()).await.ok();
         let follow_enabled = followed_user_id.is_some();
+
+        #[cfg(target_os = "linux")]
         let output_name = audio_output_name_or_default(&settings.audio_output_name);
+
+        #[cfg(target_os = "linux")]
         let capture_target = capture_target_or_default(&settings.capture_target);
+
+        #[cfg(target_os = "linux")]
         let sink_name = sanitize_audio_output_name(&output_name);
 
         #[cfg(target_os = "linux")]
@@ -1200,12 +1211,10 @@ impl Backend {
                     })?;
                 songbird::input::Input::Live(promoted, None)
             }
-            songbird::input::Input::Lazy(_) => {
-                return Err(
-                    "Bardic Chord created a lazy audio input unexpectedly and could not arm the relay."
-                        .into(),
-                )
-            }
+            songbird::input::Input::Lazy(_) => return Err(
+                "Bardic Chord created a lazy audio input unexpectedly and could not arm the relay."
+                    .into(),
+            ),
         };
 
         let actual_voice_channel_id = initial_channel_id.get().to_string();
@@ -1463,9 +1472,7 @@ impl AppSnapshot {
                 )
             },
             if cfg!(target_os = "windows") {
-                format!(
-                    "Keep `{capture_target}` running so Bardic Chord can capture its audio."
-                )
+                format!("Keep `{capture_target}` running so Bardic Chord can capture its audio.")
             } else {
                 format!(
                     "In your system sound settings, make sure `{capture_target}` is routed to that output."
@@ -1589,8 +1596,12 @@ fn audio_output_instructions(active: bool, output_name: &str, capture_target: &s
         }
     } else if active {
         vec![
-            format!("Open your system sound settings and route `{capture_target}` to `{output_name}`."),
-            format!("Keep `{capture_target}` playing through `{output_name}` while the party is live."),
+            format!(
+                "Open your system sound settings and route `{capture_target}` to `{output_name}`."
+            ),
+            format!(
+                "Keep `{capture_target}` playing through `{output_name}` while the party is live."
+            ),
             "If the output disappears, prepare it again from Bardic Chord.".into(),
         ]
     } else {
@@ -1718,7 +1729,7 @@ fn parse_snowflake(input: &str, label: &str) -> Result<u64, String> {
 }
 
 async fn stop_existing_audio_output(runtime: Option<AudioOutputRuntime>) -> Result<(), String> {
-    let Some(mut runtime) = runtime else {
+    let Some(runtime) = runtime else {
         return Ok(());
     };
 
@@ -1726,6 +1737,7 @@ async fn stop_existing_audio_output(runtime: Option<AudioOutputRuntime>) -> Resu
 
     #[cfg(target_os = "linux")]
     {
+        let mut runtime = runtime;
         match &mut runtime.platform {
             AudioPlatformRuntime::Linux(linux) => {
                 info!(sink_name = %linux.sink_name, "stopping Linux audio capture child");
@@ -1733,17 +1745,33 @@ async fn stop_existing_audio_output(runtime: Option<AudioOutputRuntime>) -> Resu
                 let _ = linux.capture_child.wait().await;
                 unload_pulse_module(&linux.module_id).await?;
             }
-            #[cfg(target_os = "windows")]
+        }
+
+        return match timeout(Duration::from_secs(5), runtime.task_handle).await {
+            Ok(_) => Ok(()),
+            Err(_) => Err("Timed out while shutting down the desktop audio capture task.".into()),
+        };
+    }
+
+    #[cfg(target_os = "windows")]
+    {
+        match &runtime.platform {
             AudioPlatformRuntime::Windows(windows) => {
                 info!("stopping Windows target loopback capture");
                 windows.stop_signal.store(true, Ordering::SeqCst);
             }
         }
+
+        return match timeout(Duration::from_secs(5), runtime.task_handle).await {
+            Ok(_) => Ok(()),
+            Err(_) => Err("Timed out while shutting down the desktop audio capture task.".into()),
+        };
     }
 
-    match timeout(Duration::from_secs(5), runtime.task_handle).await {
-        Ok(_) => Ok(()),
-        Err(_) => Err("Timed out while shutting down the desktop audio capture task.".into()),
+    #[cfg(not(any(target_os = "linux", target_os = "windows")))]
+    {
+        let _ = runtime;
+        Ok(())
     }
 }
 
@@ -1831,9 +1859,7 @@ async fn start_linux_audio_output(
                     if last_activity_log.elapsed() >= Duration::from_secs(2) && samples_seen > 0 {
                         info!(
                             samples_seen,
-                            non_silent_samples,
-                            peak,
-                            "desktop audio capture activity window"
+                            non_silent_samples, peak, "desktop audio capture activity window"
                         );
                         samples_seen = 0;
                         non_silent_samples = 0;
@@ -1882,8 +1908,7 @@ async fn start_windows_audio_output(
             emitted_sink,
             stop_for_task,
             log_path.clone(),
-        )
-        {
+        ) {
             error!(
                 log_path = %log_path.display(),
                 ?error,
@@ -1907,9 +1932,17 @@ fn run_windows_target_loopback(
     log_path: PathBuf,
 ) -> Result<(), String> {
     wasapi::initialize_mta()
+        .ok()
         .map_err(|error| format!("failed to initialize Windows audio COM apartment: {error}"))?;
 
-    let desired_format = WaveFormat::new(32, 32, &SampleType::Float, AUDIO_SAMPLE_RATE, 2, None);
+    let desired_format = WaveFormat::new(
+        32,
+        32,
+        &SampleType::Float,
+        AUDIO_SAMPLE_RATE as usize,
+        2,
+        None,
+    );
     let mut audio_client = AudioClient::new_application_loopback_client(target_pid, true)
         .map_err(|error| {
             format!(
@@ -1932,9 +1965,9 @@ fn run_windows_target_loopback(
         .get_audiocaptureclient()
         .map_err(|error| format!("failed to open the Windows loopback capture client: {error}"))?;
 
-    audio_client
-        .start_stream()
-        .map_err(|error| format!("failed to start the Windows loopback stream for `{capture_target}`: {error}"))?;
+    audio_client.start_stream().map_err(|error| {
+        format!("failed to start the Windows loopback stream for `{capture_target}`: {error}")
+    })?;
 
     info!(
         target_pid,
@@ -1957,14 +1990,17 @@ fn run_windows_target_loopback(
         if let Err(error) = event_handle.wait_for_event(250) {
             let message = error.to_string();
             if !message.to_ascii_lowercase().contains("timeout") {
-                warn!(?error, "Windows loopback event wait returned a non-timeout warning");
+                warn!(
+                    ?error,
+                    "Windows loopback event wait returned a non-timeout warning"
+                );
             }
         }
 
         loop {
-            let Some(next_frames) = capture_client
-                .get_next_packet_size()
-                .map_err(|error| format!("failed to query the Windows loopback packet size: {error}"))?
+            let Some(next_frames) = capture_client.get_next_packet_size().map_err(|error| {
+                format!("failed to query the Windows loopback packet size: {error}")
+            })?
             else {
                 break;
             };
@@ -2015,10 +2051,8 @@ fn run_windows_target_loopback(
         if last_activity_log.elapsed() >= Duration::from_secs(2) && samples_seen > 0 {
             info!(
                 samples_seen,
-                non_silent_samples,
-                peak,
-            "windows target loopback activity window"
-        );
+                non_silent_samples, peak, "windows target loopback activity window"
+            );
             samples_seen = 0;
             non_silent_samples = 0;
             peak = 0.0;
@@ -2040,11 +2074,15 @@ async fn find_windows_target_process_id(capture_target: &str) -> Result<u32, Str
         .arg("/fi")
         .output()
         .await
-        .map_err(|error| format!("failed to run tasklist while looking for `{capture_target}`: {error}"))?;
+        .map_err(|error| {
+            format!("failed to run tasklist while looking for `{capture_target}`: {error}")
+        })?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
-        return Err(format!("tasklist failed while looking for `{capture_target}`: {stderr}"));
+        return Err(format!(
+            "tasklist failed while looking for `{capture_target}`: {stderr}"
+        ));
     }
 
     let stdout = String::from_utf8_lossy(&output.stdout);
@@ -2155,8 +2193,7 @@ async fn try_route_application_to_linux_sink(
         .map(|client| (client.index.to_string(), client.properties))
         .collect::<HashMap<_, _>>();
 
-    let inputs: Vec<PulseSinkInput> =
-        pactl_json(&["--format=json", "list", "sink-inputs"]).await?;
+    let inputs: Vec<PulseSinkInput> = pactl_json(&["--format=json", "list", "sink-inputs"]).await?;
 
     let mut attempt = TargetRouteAttempt::default();
 
@@ -2198,10 +2235,7 @@ async fn try_route_application_to_linux_sink(
         attempt.moved_inputs += 1;
         info!(
             sink_input_index = input.index,
-            sink_name,
-            output_name,
-            capture_target,
-            "moved target app stream into the Bardic sink"
+            sink_name, output_name, capture_target, "moved target app stream into the Bardic sink"
         );
     }
 
@@ -2249,10 +2283,7 @@ fn sink_input_matches_target(
 }
 
 #[cfg(target_os = "linux")]
-fn pulse_property_value<'a>(
-    properties: &'a HashMap<String, String>,
-    key: &str,
-) -> Option<&'a str> {
+fn pulse_property_value<'a>(properties: &'a HashMap<String, String>, key: &str) -> Option<&'a str> {
     properties
         .get(key)
         .map(String::as_str)
@@ -2343,10 +2374,7 @@ fn audio_output_name_or_default(value: &str) -> String {
     if trimmed.is_empty() {
         DEFAULT_AUDIO_OUTPUT_NAME.into()
     } else {
-        trimmed
-            .split_whitespace()
-            .collect::<Vec<_>>()
-            .join("_")
+        trimmed.split_whitespace().collect::<Vec<_>>().join("_")
     }
 }
 
@@ -2359,6 +2387,7 @@ fn capture_target_or_default(value: &str) -> String {
     }
 }
 
+#[cfg(any(target_os = "linux", test))]
 fn pulse_property_escape(value: &str) -> String {
     value
         .trim()
@@ -2372,6 +2401,7 @@ fn pulse_property_escape(value: &str) -> String {
         .collect()
 }
 
+#[cfg(any(target_os = "linux", test))]
 fn sanitize_audio_output_name(value: &str) -> String {
     let mut output = value
         .trim()
@@ -2525,7 +2555,10 @@ mod tests {
     fn capture_target_matcher_detects_product_name_variants() {
         assert!(property_matches_capture_target("spotify", "spotify"));
         assert!(property_matches_capture_target("Spotify", "spotify"));
-        assert!(property_matches_capture_target("/opt/spotify/spotify", "spotify"));
+        assert!(property_matches_capture_target(
+            "/opt/spotify/spotify",
+            "spotify"
+        ));
         assert!(property_matches_capture_target("firefox.exe", "firefox"));
         assert!(!property_matches_capture_target("firefox", "spotify"));
     }
@@ -2544,7 +2577,11 @@ mod tests {
             HashMap::from([("application.process.binary".into(), "spotify".into())]),
         )]);
 
-        assert!(sink_input_matches_target(&input, &client_properties, "spotify"));
+        assert!(sink_input_matches_target(
+            &input,
+            &client_properties,
+            "spotify"
+        ));
     }
 
     #[test]

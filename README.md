@@ -70,7 +70,7 @@ The Windows path now uses WASAPI application loopback capture against the select
 
 Current caveat:
 
-- the backend is implemented, but this Linux machine cannot fully verify a Windows MSVC build because the host does not have the Visual Studio toolchain (`lib.exe`)
+- the Windows backend is implemented and cross-builds from Linux now work through `cargo-zigbuild`, but the runtime still needs real Windows-side smoke testing before every public release
 
 ## macOS
 
@@ -107,14 +107,51 @@ Format the crate:
 cargo fmt --all
 ```
 
+Build the supported Linux and Windows release targets with one command:
+
+```bash
+cargo xtask release
+```
+
+Build only one release target:
+
+```bash
+cargo xtask release --target linux
+cargo xtask release --target windows
+```
+
+Prerequisites:
+
+```bash
+rustup target add x86_64-pc-windows-gnu
+cargo install --locked cargo-zigbuild
+```
+
+Current packaged release targets in this repo:
+
+- `x86_64-unknown-linux-gnu`
+- `x86_64-pc-windows-gnu`
+
+Why this matrix is smaller:
+
+- Linux x86_64 is verified locally on this machine.
+- Windows x86_64 uses the GNU target because it cross-builds cleanly from Linux with `cargo-zigbuild`.
+- Linux ARM64 can still be added later through a native ARM64 Linux runner.
+
+Built artifacts are written to `dist/`.
+
+Release tagging:
+
+- push code to `main` to run CI
+- run the GitHub Actions workflow `Tag Release` with a version like `v0.1.0`, or push a `v*` tag manually
+- the `Release` workflow will build both archives and publish them to the GitHub release for that tag
+
 ## Build Targets
 
 The repo is still set up to target these desktop binaries:
 
 - `x86_64-unknown-linux-gnu`
-- `aarch64-unknown-linux-gnu`
-- `x86_64-pc-windows-msvc`
-- `aarch64-pc-windows-msvc`
+- `x86_64-pc-windows-gnu`
 - `x86_64-apple-darwin`
 - `aarch64-apple-darwin`
 
@@ -159,7 +196,15 @@ Bardic Chord builds on and learns from several open-source projects. Thanks to t
 
 ## CI/CD
 
-GitHub Actions workflows are intentionally disabled for now. Build and release automation can be reintroduced later once the public packaging story is stable.
+GitHub Actions now covers the basic repo lifecycle:
+
+- `CI`
+  - runs on pushes to `main` and on pull requests
+  - checks formatting, builds the workspace, runs desktop unit tests, and packages Linux and Windows release archives
+- `Tag Release`
+  - manual workflow used to create an annotated `v*` tag from GitHub
+- `Release`
+  - runs on `v*` tag pushes, rebuilds both release archives, uploads workflow artifacts, and publishes the GitHub release assets
 
 ## Product Direction
 
