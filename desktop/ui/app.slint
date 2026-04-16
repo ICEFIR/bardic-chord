@@ -304,10 +304,10 @@ export component AppWindow inherits Window {
                                         InfoText { text: "The app runs on the listener's machine. The Discord token, audio routing, and party start all stay local to that machine."; }
 
                                         Button {
-                                            text: root.discord-connected && root.discord-route-ready ? "Continue to Desktop Audio" : "Continue Setup";
+                                            text: root.discord-connected ? "Continue to Desktop Audio" : "Continue Setup";
                                             primary: true;
                                             clicked => {
-                                                if root.discord-connected && root.discord-route-ready {
+                                                if root.discord-connected {
                                                     root.current-page = 2;
                                                 } else {
                                                     root.current-page = 1;
@@ -389,7 +389,7 @@ export component AppWindow inherits Window {
                                     title: "Step 1: Connect Discord";
                                     VerticalBox {
                                         spacing: 12px;
-                                        InfoText { text: "Paste your Discord bot token. Bardic Chord will open the invite page for you and then load your servers automatically."; }
+                                        InfoText { text: "Paste your Discord bot token. Bardic Chord can open the bot authorize page for you and then load your servers automatically."; }
 
                                         Text { text: "Bot Token"; color: #d7d1c7; }
                                         LineEdit {
@@ -399,7 +399,7 @@ export component AppWindow inherits Window {
                                             edited => { root.draft-changed(); }
                                         }
 
-                                        InfoText { text: "After the invite finishes, choose the server and voice channel below. If you want the bot to follow one friend around, you can turn that on too."; }
+                                        InfoText { text: "Once the token works, continue to Desktop Audio. The Launch page is the control panel where you pick the server, voice channel, and optional follow mode."; }
 
                                         HorizontalBox {
                                             spacing: 12px;
@@ -421,47 +421,10 @@ export component AppWindow inherits Window {
                                             }
                                         }
 
-                                        Rectangle { height: 1px; background: #31434a; }
-
-                                        Text { text: "Choose where the music should play."; color: #d7d1c7; }
-                                        Text { text: "Server"; color: #d7d1c7; }
-                                        ComboBox {
-                                            model: root.discord-guild-model;
-                                            current-index <=> root.discord-guild-index;
-                                            selected => { root.draft-changed(); }
-                                        }
-
-                                        Text { text: "Voice Channel"; color: #d7d1c7; }
-                                        ComboBox {
-                                            model: root.discord-voice-channel-model;
-                                            current-index <=> root.discord-voice-channel-index;
-                                            selected => { root.draft-changed(); }
-                                        }
-
-                                        CheckBox {
-                                            text: "Follow a specific user instead of staying in the selected channel";
-                                            checked <=> root.follow-user-enabled;
-                                            toggled => { root.draft-changed(); }
-                                        }
-
-                                        Text { text: "Follow User"; color: #d7d1c7; }
-                                        LineEdit {
-                                            text <=> root.tracked-user-id;
-                                            enabled: root.follow-user-enabled;
-                                            placeholder-text: "Paste a user ID, mention, or Discord profile link";
-                                            edited => { root.draft-changed(); }
-                                        }
-
-                                        InfoText {
-                                            text: root.follow-user-enabled
-                                                ? "When enabled, Bardic Chord will normalize the pasted Discord user reference and follow that user on startup and later voice moves."
-                                                : "Follow mode is off. Bardic Chord will stay in the selected voice channel.";
-                                        }
-
                                         Button {
                                             text: "Continue to Desktop Audio";
                                             primary: true;
-                                            enabled: root.discord-connected && root.discord-route-ready;
+                                            enabled: root.discord-connected;
                                             clicked => { root.current-page = 2; }
                                         }
                                     }
@@ -483,15 +446,7 @@ export component AppWindow inherits Window {
                                         VerticalBox {
                                             spacing: 10px;
                                             InfoText { text: root.discord-connected ? "Bot token is connected and working." : "Bot token is not connected yet."; }
-                                            InfoText { text: root.guild-id == "" ? "Server: not chosen yet" : "Server is selected and ready."; }
-                                            InfoText { text: root.voice-channel-id == "" ? "Voice channel: not chosen yet" : "Voice channel is selected and ready."; }
-                                            InfoText {
-                                                text: root.follow-user-enabled
-                                                    ? (root.tracked-user-id == ""
-                                                        ? "Follow mode is on, but Bardic Chord still needs the user."
-                                                        : "Follow mode is on. Bardic Chord will move with that user.")
-                                                    : "Follow mode is off. Bardic Chord will stay in the selected voice channel.";
-                                            }
+                                            InfoText { text: "Server and voice channel are chosen from the Launch page control panel."; }
                                             InfoText { text: root.discord-route-text; }
                                             InfoText { text: root.discord-invite-url == "" ? "Invite link will be generated automatically from the bot token." : "Invite link is ready if you need to reopen it."; }
                                         }
@@ -544,7 +499,7 @@ export component AppWindow inherits Window {
                                             }
                                             Button {
                                                 text: "Continue to Launch";
-                                                enabled: root.discord-connected && root.discord-route-ready;
+                                                enabled: root.discord-connected;
                                                 clicked => { root.current-page = 3; }
                                             }
                                         }
@@ -581,14 +536,56 @@ export component AppWindow inherits Window {
                                 spacing: 18px;
 
                                 GroupBox {
-                                    title: "Step 3: Start the Party";
+                                    title: "Step 3: Control the Party";
                                     VerticalBox {
                                         spacing: 12px;
 
-                                        InfoText { text: "Once desktop audio is prepared, press Start Party. Bardic Chord will keep the local capture and Discord voice session on this machine."; }
+                                        InfoText { text: "Choose where the bot should play, then start or restart the party. Route changes are saved immediately. If the party is already live, press Restart Party to move it to the new route."; }
+
+                                        Text { text: "Server"; color: #d7d1c7; }
+                                        ComboBox {
+                                            model: root.discord-guild-model;
+                                            current-index <=> root.discord-guild-index;
+                                            enabled: root.discord-connected;
+                                            selected => { root.draft-changed(); }
+                                        }
+
+                                        Text { text: "Voice Channel"; color: #d7d1c7; }
+                                        ComboBox {
+                                            model: root.discord-voice-channel-model;
+                                            current-index <=> root.discord-voice-channel-index;
+                                            enabled: root.discord-connected;
+                                            selected => { root.draft-changed(); }
+                                        }
+
+                                        CheckBox {
+                                            text: "Follow a specific user instead of staying in the selected channel";
+                                            checked <=> root.follow-user-enabled;
+                                            enabled: root.discord-connected;
+                                            toggled => { root.draft-changed(); }
+                                        }
+
+                                        Text { text: "Follow User"; color: #d7d1c7; }
+                                        LineEdit {
+                                            text <=> root.tracked-user-id;
+                                            enabled: root.discord-connected && root.follow-user-enabled;
+                                            placeholder-text: "Paste a user ID, mention, or Discord profile link";
+                                            edited => { root.draft-changed(); }
+                                        }
+
+                                        InfoText {
+                                            text: root.follow-user-enabled
+                                                ? "Bardic Chord will normalize the pasted Discord user reference and follow that user on startup and later voice moves."
+                                                : "Follow mode is off. Bardic Chord will stay in the selected voice channel until you restart it elsewhere.";
+                                        }
 
                                         HorizontalBox {
                                             spacing: 12px;
+                                            Button {
+                                                text: "Refresh Discord";
+                                                enabled: root.discord-bot-token != "";
+                                                clicked => { root.request-validate-discord(); }
+                                            }
                                             Button {
                                                 text: root.relay-active ? "Restart Party" : "Start Party";
                                                 primary: true;
@@ -622,10 +619,19 @@ export component AppWindow inherits Window {
                                     }
 
                                     GroupBox {
-                                        title: "Pre-flight";
+                                        title: "Route Summary";
                                         VerticalBox {
                                             spacing: 10px;
-                                            InfoText { text: root.ritual-steps-text; }
+                                            InfoText { text: root.guild-id == "" ? "Server: not chosen yet." : "Server is selected and saved."; }
+                                            InfoText { text: root.voice-channel-id == "" ? "Voice channel: not chosen yet." : "Voice channel is selected and saved."; }
+                                            InfoText {
+                                                text: root.follow-user-enabled
+                                                    ? (root.tracked-user-id == ""
+                                                        ? "Follow mode is on, but Bardic Chord still needs the user."
+                                                        : "Follow mode is on and ready for that user.")
+                                                    : "Follow mode is off. Bardic Chord will stay in the selected channel.";
+                                            }
+                                            InfoText { text: root.discord-route-text; }
                                             Rectangle { height: 1px; background: #31434a; }
                                             InfoText { text: "If the app gets routed back to your speakers or the desktop output is recreated, prepare the output again and then restart the party."; }
                                         }
