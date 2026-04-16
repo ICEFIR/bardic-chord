@@ -1,0 +1,633 @@
+import { Button, CheckBox, ComboBox, GroupBox, HorizontalBox, LineEdit, ScrollView, VerticalBox } from "std-widgets.slint";
+
+component StepButton inherits Button {
+    in property <string> label;
+    in property <bool> active;
+    text: active ? "[" + label + "]" : label;
+    primary: active;
+    icon-size: 0px;
+}
+
+component InfoText inherits Text {
+    color: #d7d1c7;
+    wrap: word-wrap;
+    font-size: 15px;
+}
+
+component StatusCard inherits Rectangle {
+    in property <string> label;
+    in property <string> state;
+    in property <string> detail;
+    in property <brush> accent;
+
+    border-radius: 18px;
+    background: #162126;
+    border-color: accent;
+    border-width: 1px;
+    min-height: 170px;
+
+    VerticalBox {
+        padding: 18px;
+        spacing: 8px;
+
+        Text {
+            text: label;
+            color: #90b8b5;
+            font-size: 13px;
+        }
+
+        Text {
+            text: state;
+            color: #f6efe2;
+            font-size: 22px;
+            font-weight: 700;
+        }
+
+        Rectangle {
+            height: 3px;
+            border-radius: 2px;
+            background: accent;
+        }
+
+        InfoText { text: detail; }
+    }
+}
+
+export component AppWindow inherits Window {
+    title: "Bardic Chord";
+    icon: @image-url("../../icon.png");
+    preferred-width: 1440px;
+    preferred-height: 920px;
+    min-width: 1180px;
+    min-height: 760px;
+    background: #0e1416;
+
+    in-out property <int> current-page: 0;
+
+    in-out property <string> discord-bot-token;
+    in-out property <bool> follow-user-enabled;
+    in-out property <string> tracked-user-id;
+    in-out property <string> guild-id;
+    in-out property <string> voice-channel-id;
+    in-out property <string> audio-output-name;
+    in-out property <string> bot-display-name;
+
+    in-out property <string> preview-line;
+    in-out property <string> completion-summary;
+    in-out property <string> runtime-summary;
+    in-out property <string> save-message;
+    in-out property <string> discord-permissions;
+    in-out property <bool> discord-connected;
+    in-out property <bool> discord-route-ready;
+    in-out property <bool> party-can-stop;
+    in-out property <bool> audio-prepared;
+
+    in-out property <bool> relay-active;
+    in-out property <string> relay-status-title;
+    in-out property <string> relay-status-body;
+    in-out property <string> relay-instructions-text;
+
+    in-out property <string> audio-status-title;
+    in-out property <string> audio-status-body;
+    in-out property <string> audio-instructions-text;
+
+    in-out property <string> discord-status-title;
+    in-out property <string> discord-status-body;
+    in-out property <string> discord-route-text;
+    in-out property <string> discord-invite-url;
+    in-out property <[string]> discord-guild-model: [];
+    in-out property <[string]> discord-guild-id-model: [];
+    in-out property <int> discord-guild-index: 0;
+    in-out property <[string]> discord-voice-channel-model: [];
+    in-out property <[string]> discord-voice-channel-id-model: [];
+    in-out property <int> discord-voice-channel-index: 0;
+
+    in-out property <string> overview-health-text;
+    in-out property <string> ritual-steps-text;
+    in-out property <string> activity-text;
+
+    in-out property <bool> busy-visible;
+    in-out property <string> busy-label;
+
+    callback draft-changed();
+    callback request-save();
+    callback request-validate-discord();
+    callback request-connect-discord();
+    callback request-disconnect-discord();
+    callback request-prepare-audio();
+    callback request-stop-audio();
+    callback request-launch-party();
+    callback request-stop-party();
+
+    Rectangle {
+        background: #0e1416;
+        width: parent.width;
+        height: parent.height;
+
+        HorizontalBox {
+            padding: 24px;
+            spacing: 20px;
+            width: parent.width;
+            height: parent.height;
+
+            Rectangle {
+                width: 290px;
+                border-radius: 24px;
+                background: #162126;
+                border-color: #31434a;
+                border-width: 1px;
+
+                VerticalBox {
+                    padding: 22px;
+                    spacing: 14px;
+
+                    Image {
+                        width: 84px;
+                        height: 84px;
+                        horizontal-alignment: center;
+                        source: @image-url("../../icon.png");
+                    }
+
+                    Text {
+                        text: "Bardic Chord";
+                        color: #f5d181;
+                        horizontal-alignment: center;
+                        font-size: 28px;
+                        font-weight: 700;
+                    }
+
+                    InfoText {
+                        text: "A simple desktop guide for sending Spotify into a Discord voice channel.";
+                        horizontal-alignment: center;
+                    }
+
+                    Rectangle { height: 1px; background: #31434a; }
+
+                    Text {
+                        text: "Journey";
+                        color: #90b8b5;
+                        font-size: 13px;
+                    }
+
+                    StepButton {
+                        label: "Welcome";
+                        active: root.current-page == 0;
+                        clicked => { root.current-page = 0; }
+                    }
+                    StepButton {
+                        label: "Discord";
+                        active: root.current-page == 1;
+                        clicked => { root.current-page = 1; }
+                    }
+                    StepButton {
+                        label: "Desktop Audio";
+                        active: root.current-page == 2;
+                        clicked => { root.current-page = 2; }
+                    }
+                    StepButton {
+                        label: "Launch";
+                        active: root.current-page == 3;
+                        clicked => { root.current-page = 3; }
+                    }
+
+                    Rectangle { height: 1px; background: #31434a; }
+
+                    Text {
+                        text: "Live Summary";
+                        color: #90b8b5;
+                        font-size: 13px;
+                    }
+
+                    InfoText { text: root.completion-summary; }
+                    InfoText { text: root.runtime-summary; }
+
+                    if root.busy-visible : Rectangle {
+                        border-radius: 16px;
+                        background: #25343b;
+                        border-color: #45616c;
+                        border-width: 1px;
+                        min-height: 90px;
+
+                        VerticalBox {
+                            padding: 16px;
+                            spacing: 8px;
+
+                            Text {
+                                text: "Working";
+                                color: #f5d181;
+                                font-size: 14px;
+                                font-weight: 600;
+                            }
+
+                            InfoText { text: root.busy-label; }
+                        }
+                    }
+
+                    Rectangle { height: 1px; background: #31434a; }
+
+                    Text {
+                        text: "Autosave";
+                        color: #90b8b5;
+                        font-size: 13px;
+                    }
+
+                    InfoText { text: root.save-message; }
+                }
+            }
+
+            Rectangle {
+                border-radius: 28px;
+                background: #11181b;
+                border-color: #31434a;
+                border-width: 1px;
+
+                VerticalBox {
+                    padding: 24px;
+                    spacing: 18px;
+
+                    Rectangle {
+                        border-radius: 22px;
+                        background: #1a252a;
+                        border-color: #37525e;
+                        border-width: 1px;
+                        min-height: 148px;
+
+                        HorizontalBox {
+                            padding: 22px;
+                            spacing: 18px;
+
+                            Rectangle {
+                                width: 84px;
+                                height: 84px;
+                                border-radius: 42px;
+                                background: #24343a;
+
+                                Image {
+                                    width: 58px;
+                                    height: 58px;
+                                    x: 13px;
+                                    y: 13px;
+                                    source: @image-url("../../icon.png");
+                                }
+                            }
+
+                            VerticalBox {
+                                spacing: 10px;
+
+                                Text {
+                                    text: "Set it up once, then let the music play.";
+                                    color: #f6efe2;
+                                    font-size: 30px;
+                                    font-weight: 700;
+                                }
+
+                                InfoText { text: root.preview-line; }
+                            }
+                        }
+                    }
+
+                    ScrollView {
+                        viewport-width: self.width;
+
+                        VerticalBox {
+                            spacing: 18px;
+
+                            if root.current-page == 0 : VerticalBox {
+                                spacing: 18px;
+
+                                GroupBox {
+                                    title: "Start Here";
+                                    VerticalBox {
+                                        spacing: 12px;
+                                        InfoText { text: "Bardic Chord walks through setup in order so you only need to follow one path forward."; }
+                                        InfoText { text: "The app runs on the listener's machine. The Discord token, audio routing, and party start all stay local to that machine."; }
+
+                                        Button {
+                                            text: root.discord-connected && root.discord-route-ready ? "Continue to Desktop Audio" : "Continue Setup";
+                                            primary: true;
+                                            clicked => {
+                                                if root.discord-connected && root.discord-route-ready {
+                                                    root.current-page = 2;
+                                                } else {
+                                                    root.current-page = 1;
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+
+                                HorizontalBox {
+                                    spacing: 18px;
+
+                                    StatusCard {
+                                        label: "Discord";
+                                        state: root.discord-connected ? "Ready" : "Needed";
+                                        detail: root.discord-connected
+                                            ? "The bot token is saved and Bardic Chord can talk to Discord."
+                                            : "Paste the bot token and open the invite page if the bot is not in your server yet.";
+                                        accent: root.discord-connected ? #b89cf3 : #5f7b89;
+                                    }
+
+                                    StatusCard {
+                                        label: "Desktop Audio";
+                                        state: root.audio-prepared ? "Prepared" : "Waiting";
+                                        detail: root.audio-prepared
+                                            ? "The local Bardic Chord output is live. Route Spotify to it from your sound settings."
+                                            : "Prepare a local Bardic Chord output, then point Spotify at it in your system mixer.";
+                                        accent: root.audio-prepared ? #b89cf3 : #5f7b89;
+                                    }
+                                }
+
+                                HorizontalBox {
+                                    spacing: 18px;
+
+                                    StatusCard {
+                                        label: "Voice Route";
+                                        state: root.discord-route-ready ? "Ready" : "Needed";
+                                        detail: root.discord-route-ready
+                                            ? "The server and voice channel are chosen."
+                                            : "Pick the Discord server and voice channel where the music should play.";
+                                        accent: root.discord-route-ready ? #b89cf3 : #5f7b89;
+                                    }
+
+                                    StatusCard {
+                                        label: "Launch";
+                                        state: root.relay-active ? "Live" : (root.audio-prepared && root.discord-route-ready ? "Ready" : "Waiting");
+                                        detail: root.relay-active
+                                            ? "The party is already live in Discord."
+                                            : "Once Discord and audio are ready, start the party from the final page.";
+                                        accent: root.relay-active ? #b89cf3 : #5f7b89;
+                                    }
+                                }
+
+                                HorizontalBox {
+                                    spacing: 18px;
+
+                                    GroupBox {
+                                        title: "Ritual Steps";
+                                        VerticalBox {
+                                            spacing: 10px;
+                                            InfoText { text: root.ritual-steps-text; }
+                                        }
+                                    }
+
+                                    GroupBox {
+                                        title: "Recent Activity";
+                                        VerticalBox {
+                                            spacing: 10px;
+                                            InfoText { text: root.activity-text; }
+                                        }
+                                    }
+                                }
+                            }
+
+                            if root.current-page == 1 : VerticalBox {
+                                spacing: 18px;
+
+                                GroupBox {
+                                    title: "Step 1: Connect Discord";
+                                    VerticalBox {
+                                        spacing: 12px;
+                                        InfoText { text: "Paste your Discord bot token. Bardic Chord will open the invite page for you and then load your servers automatically."; }
+
+                                        Text { text: "Bot Token"; color: #d7d1c7; }
+                                        LineEdit {
+                                            text <=> root.discord-bot-token;
+                                            placeholder-text: "Paste the Discord bot token";
+                                            input-type: password;
+                                            edited => { root.draft-changed(); }
+                                        }
+
+                                        InfoText { text: "After the invite finishes, choose the server and voice channel below. If you want the bot to follow one friend around, you can turn that on too."; }
+
+                                        HorizontalBox {
+                                            spacing: 12px;
+                                            Button {
+                                                text: "Connect Discord";
+                                                primary: true;
+                                                enabled: root.discord-bot-token != "";
+                                                clicked => { root.request-connect-discord(); }
+                                            }
+                                            Button {
+                                                text: "Refresh Server List";
+                                                enabled: root.discord-bot-token != "";
+                                                clicked => { root.request-validate-discord(); }
+                                            }
+                                            Button {
+                                                text: "Disconnect Discord";
+                                                enabled: root.discord-bot-token != "";
+                                                clicked => { root.request-disconnect-discord(); }
+                                            }
+                                        }
+
+                                        Rectangle { height: 1px; background: #31434a; }
+
+                                        Text { text: "Choose where the music should play."; color: #d7d1c7; }
+                                        Text { text: "Server"; color: #d7d1c7; }
+                                        ComboBox {
+                                            model: root.discord-guild-model;
+                                            current-index <=> root.discord-guild-index;
+                                            selected => { root.draft-changed(); }
+                                        }
+
+                                        Text { text: "Voice Channel"; color: #d7d1c7; }
+                                        ComboBox {
+                                            model: root.discord-voice-channel-model;
+                                            current-index <=> root.discord-voice-channel-index;
+                                            selected => { root.draft-changed(); }
+                                        }
+
+                                        CheckBox {
+                                            text: "Follow a specific user instead of staying in the selected channel";
+                                            checked <=> root.follow-user-enabled;
+                                            toggled => { root.draft-changed(); }
+                                        }
+
+                                        Text { text: "Follow User"; color: #d7d1c7; }
+                                        LineEdit {
+                                            text <=> root.tracked-user-id;
+                                            enabled: root.follow-user-enabled;
+                                            placeholder-text: "Paste a user ID, mention, or Discord profile link";
+                                            edited => { root.draft-changed(); }
+                                        }
+
+                                        InfoText {
+                                            text: root.follow-user-enabled
+                                                ? "When enabled, Bardic Chord will normalize the pasted Discord user reference and follow that user on startup and later voice moves."
+                                                : "Follow mode is off. Bardic Chord will stay in the selected voice channel.";
+                                        }
+
+                                        Button {
+                                            text: "Continue to Desktop Audio";
+                                            primary: true;
+                                            enabled: root.discord-connected && root.discord-route-ready;
+                                            clicked => { root.current-page = 2; }
+                                        }
+                                    }
+                                }
+
+                                HorizontalBox {
+                                    spacing: 18px;
+
+                                    GroupBox {
+                                        title: root.discord-status-title;
+                                        VerticalBox {
+                                            spacing: 10px;
+                                            InfoText { text: root.discord-status-body; }
+                                        }
+                                    }
+
+                                    GroupBox {
+                                        title: "What Bardic Chord Will Do";
+                                        VerticalBox {
+                                            spacing: 10px;
+                                            InfoText { text: root.discord-connected ? "Bot token is connected and working." : "Bot token is not connected yet."; }
+                                            InfoText { text: root.guild-id == "" ? "Server: not chosen yet" : "Server is selected and ready."; }
+                                            InfoText { text: root.voice-channel-id == "" ? "Voice channel: not chosen yet" : "Voice channel is selected and ready."; }
+                                            InfoText {
+                                                text: root.follow-user-enabled
+                                                    ? (root.tracked-user-id == ""
+                                                        ? "Follow mode is on, but Bardic Chord still needs the user."
+                                                        : "Follow mode is on. Bardic Chord will move with that user.")
+                                                    : "Follow mode is off. Bardic Chord will stay in the selected voice channel.";
+                                            }
+                                            InfoText { text: root.discord-route-text; }
+                                            InfoText { text: root.discord-invite-url == "" ? "Invite link will be generated automatically from the bot token." : "Invite link is ready if you need to reopen it."; }
+                                        }
+                                    }
+                                }
+                            }
+
+                            if root.current-page == 2 : VerticalBox {
+                                spacing: 18px;
+
+                                GroupBox {
+                                    title: "Step 2: Prepare Desktop Audio";
+                                    VerticalBox {
+                                        spacing: 12px;
+
+                                        InfoText { text: "Bardic Chord creates a local output on Linux. If Spotify is already playing, Bardic Chord will try to route it automatically. You can still move it from your system sound settings if needed."; }
+
+                                        Text { text: "Audio Output Name"; color: #d7d1c7; }
+                                        LineEdit {
+                                            text <=> root.audio-output-name;
+                                            placeholder-text: "Bardic_Chord";
+                                            edited => { root.draft-changed(); }
+                                        }
+
+                                        Text { text: "Bot Display Name"; color: #d7d1c7; }
+                                        LineEdit {
+                                            text <=> root.bot-display-name;
+                                            placeholder-text: "The Amber Minstrel";
+                                            edited => { root.draft-changed(); }
+                                        }
+
+                                        HorizontalBox {
+                                            spacing: 12px;
+                                            Button {
+                                                text: "Prepare Audio Output";
+                                                primary: true;
+                                                clicked => { root.request-prepare-audio(); }
+                                            }
+                                            Button {
+                                                text: "Turn Output Off";
+                                                enabled: root.audio-prepared;
+                                                clicked => { root.request-stop-audio(); }
+                                            }
+                                            Button {
+                                                text: "Continue to Launch";
+                                                enabled: root.discord-connected && root.discord-route-ready;
+                                                clicked => { root.current-page = 3; }
+                                            }
+                                        }
+                                    }
+                                }
+
+                                HorizontalBox {
+                                    spacing: 18px;
+
+                                    GroupBox {
+                                        title: root.audio-status-title;
+                                        VerticalBox {
+                                            spacing: 10px;
+                                            InfoText { text: root.audio-status-body; }
+                                            Rectangle { height: 1px; background: #31434a; }
+                                            InfoText { text: root.audio-instructions-text; }
+                                        }
+                                    }
+
+                                    GroupBox {
+                                        title: "What to Do in Spotify";
+                                        VerticalBox {
+                                            spacing: 10px;
+                                            InfoText { text: "1. Open your system sound settings or volume mixer."; }
+                                            InfoText { text: "2. If Spotify does not move automatically, route it to the output shown above."; }
+                                            InfoText { text: "3. Keep Spotify playing through that output while Bardic Chord is live."; }
+                                            InfoText { text: "4. Return here and start the party."; }
+                                        }
+                                    }
+                                }
+                            }
+
+                            if root.current-page == 3 : VerticalBox {
+                                spacing: 18px;
+
+                                GroupBox {
+                                    title: "Step 3: Start the Party";
+                                    VerticalBox {
+                                        spacing: 12px;
+
+                                        InfoText { text: "Once Spotify is routed to the prepared output, press Start Party. Bardic Chord will keep the local capture and Discord voice session on this machine."; }
+
+                                        HorizontalBox {
+                                            spacing: 12px;
+                                            Button {
+                                                text: root.relay-active ? "Restart Party" : "Start Party";
+                                                primary: true;
+                                                enabled: root.discord-connected && root.discord-route-ready;
+                                                clicked => { root.request-launch-party(); }
+                                            }
+                                            Button {
+                                                text: "Stop Party";
+                                                enabled: root.party-can-stop;
+                                                clicked => { root.request-stop-party(); }
+                                            }
+                                            Button {
+                                                text: "Back to Desktop Audio";
+                                                clicked => { root.current-page = 2; }
+                                            }
+                                        }
+                                    }
+                                }
+
+                                HorizontalBox {
+                                    spacing: 18px;
+
+                                    GroupBox {
+                                        title: root.relay-status-title;
+                                        VerticalBox {
+                                            spacing: 10px;
+                                            InfoText { text: root.relay-status-body; }
+                                            Rectangle { height: 1px; background: #31434a; }
+                                            InfoText { text: root.relay-instructions-text; }
+                                        }
+                                    }
+
+                                    GroupBox {
+                                        title: "Pre-flight";
+                                        VerticalBox {
+                                            spacing: 10px;
+                                            InfoText { text: root.ritual-steps-text; }
+                                            Rectangle { height: 1px; background: #31434a; }
+                                            InfoText { text: "If Spotify gets routed back to your speakers or the desktop output is recreated, prepare the output again and then restart the party."; }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}

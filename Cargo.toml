@@ -1,0 +1,16 @@
+[workspace]
+members = ["desktop"]
+resolver = "2"
+
+[profile.release]
+codegen-units = 1
+lto = "thin"
+opt-level = 3
+panic = "abort"
+strip = "symbols"
+
+[patch.crates-io]
+symphonia = { git = "https://github.com/pdeljanov/Symphonia.git", tag = "v0.5.5" }
+symphonia-codec-pcm = { git = "https://github.com/pdeljanov/Symphonia.git", tag = "v0.5.5" }
+symphonia-core = { git = "https://github.com/pdeljanov/Symphonia.git", tag = "v0.5.5" }
+symphonia-metadata = { git = "https://github.com/pdeljanov/Symphonia.git", tag = "v0.5.5" }
