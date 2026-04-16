@@ -52,7 +52,6 @@ jobs:
           rustc --version
           cargo --version
           command -v cargo-zigbuild
-          zig version
 
       - name: Check formatting
         run: cargo fmt --all --check
