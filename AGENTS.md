@@ -18,7 +18,7 @@ Bardic Chord is an open-source Rust-first desktop experiment. The product bar is
 - `desktop/ui/` owns the Slint desktop control surface and should reflect the real backend flow.
 - The active media path is local desktop-audio capture, not a Spotify Connect receiver.
 - Linux currently uses a dedicated Bardic Chord sink plus monitor capture through the system audio stack.
-- Future Windows support should follow the same user flow with a native loopback backend rather than reviving the old librespot path.
+- Windows now targets app-process loopback capture behind the same guided flow rather than reviving the old librespot path.
 - Do not reintroduce Tauri/WebView scaffolding unless the user explicitly asks for it.
 
 ## UX Direction
@@ -27,7 +27,7 @@ Bardic Chord is an open-source Rust-first desktop experiment. The product bar is
   1. save the Discord token and route locally
   2. validate Discord and open the invite page when needed
   3. prepare the Bardic Chord desktop output
-  4. route Spotify to that output in system sound settings
+  4. route the chosen capture app to that output in system sound settings when needed
   5. start the party
   6. optionally follow a target Discord user between voice channels
 - Keep actions obvious and stateful. If something is cached locally, surface that clearly.

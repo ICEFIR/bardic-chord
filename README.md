@@ -1,6 +1,6 @@
 # Bardic Chord
 
-Bardic Chord is an open-source, cross-platform Rust desktop experiment for routing Spotify playback into Discord voice. The current app uses a native Slint shell and a guided setup flow built around local desktop-audio capture instead of a Spotify Connect receiver.
+Bardic Chord is an open-source, cross-platform Rust desktop experiment for routing desktop app audio into Discord voice. The current app uses a native Slint shell and a guided setup flow built around local desktop-audio capture instead of a Spotify Connect receiver.
 
 ## Current State
 
@@ -8,6 +8,7 @@ Bardic Chord is an open-source, cross-platform Rust desktop experiment for routi
 - local settings and logs stored under `./.bardic-chord/` in the current working directory
 - Discord validation and voice relay runtime backed by `serenity` and `songbird`
 - Linux desktop-audio backend that creates a local null sink with `pactl` and captures it with `parec`
+- Windows desktop-audio backend that captures the selected app directly through WASAPI process loopback
 - live PCM bridge from that local Bardic Chord output into Discord voice
 
 For the current POC, the Discord bot token is stored in Bardic Chord's local config file on the user's machine. It is not hard-coded into the binary, and it is not using OS keychain storage yet.
@@ -16,14 +17,13 @@ For the current POC, the Discord bot token is stored in Bardic Chord's local con
 
 The previous experiment relied on `librespot` as a Spotify Connect receiver. That path is no longer the active product direction for this repo.
 
-The current repo now prefers:
+The current repo now prefers a local capture path:
 
-1. creating a local Bardic Chord audio output
-2. routing Spotify desktop playback into that output at the OS level
-3. capturing that output locally
-4. relaying the PCM stream into Discord voice
+1. preparing the desktop audio path
+2. capturing the selected app locally
+3. relaying the PCM stream into Discord voice
 
-This keeps the user flow aligned with the longer-term Windows loopback plan while avoiding the unstable Spotify Connect receiver path.
+On Linux that means a dedicated local output plus monitor capture. On Windows that means direct process loopback for the selected app process. This keeps the UX aligned while avoiding the unstable Spotify Connect receiver path.
 
 ## Repo Layout
 
@@ -43,9 +43,10 @@ This keeps the user flow aligned with the longer-term Windows loopback plan whil
 1. Paste the Discord bot token.
 2. Open the generated Discord authorize page if the bot is not in the server yet.
 3. Choose the Discord server and voice channel.
-4. Prepare the Bardic Chord desktop audio output.
-5. In the system sound settings, route Spotify to that Bardic Chord output.
-6. Start the party so Bardic Chord joins the voice channel and forwards the local audio stream.
+4. Choose the app you want to capture.
+5. Prepare desktop audio.
+6. On Linux, route that app to the Bardic Chord output if needed. On Windows, keep the app open so loopback capture can attach to it.
+7. Start the party so Bardic Chord joins the voice channel and forwards the local audio stream.
 
 ## Linux Backend
 
@@ -56,18 +57,24 @@ The current implemented capture backend is Linux-first:
 - convert `s16le` stereo samples to float PCM
 - feed that PCM into Songbird's raw input adapter
 
-This gives Linux a dedicated Bardic Chord output that can be selected from PipeWire or PulseAudio-compatible sound settings. The current Linux flow also attempts to move Spotify into that output automatically when the stream is visible.
+This gives Linux a dedicated Bardic Chord output that can be selected from PipeWire or PulseAudio-compatible sound settings. The current Linux flow also attempts to move the selected app into that output automatically when the stream is visible.
+The selected app target is used to decide which stream Bardic Chord should try to move automatically.
 
-## Windows And macOS
+## Windows Backend
 
-The app UX now targets a shared local-output / loopback model, but only the Linux backend is implemented in this repo today.
+The Windows path now uses WASAPI application loopback capture against the selected target process.
 
-Planned direction:
+- Bardic Chord looks for the configured app process on prepare
+- it opens a per-process loopback client instead of creating a virtual output device
+- the captured float PCM is forwarded into the same Songbird relay path as Linux
 
-- Windows: WASAPI loopback or app-session loopback behind the same guided flow
-- macOS: a native capture backend that fits the same UI, if the experiment needs it later
+Current caveat:
 
-The backend shape is now centered on local audio capture, so adding those platform runtimes later should not require another UX reset.
+- the backend is implemented, but this Linux machine cannot fully verify a Windows MSVC build because the host does not have the Visual Studio toolchain (`lib.exe`)
+
+## macOS
+
+macOS still needs a native capture backend that fits the same UI if the experiment needs it later.
 
 ## Discord Bot Notes
 
@@ -122,6 +129,33 @@ That does not mean every desktop target is fully self-contained:
 ## License
 
 This repository is released under the MIT License. See `LICENSE`.
+
+## Acknowledgements
+
+Bardic Chord builds on and learns from several open-source projects. Thanks to their maintainers and contributors.
+
+- `slint`
+  - native desktop UI runtime used for the app shell and guided setup flow
+- `serenity`
+  - Discord API and gateway client
+- `songbird`
+  - Discord voice transport and audio playback runtime
+- `tokio`
+  - async runtime used throughout the app
+- `reqwest`
+  - HTTP client for Discord API validation
+- `rustls`
+  - TLS backend used by the network stack
+- `symphonia`
+  - PCM media/input support used in the relay path
+- `wasapi`
+  - Windows process loopback capture backend
+- `librespot`
+  - earlier experiments and product direction research around Spotify playback handling
+- `aoede`
+  - earlier reference point while exploring Spotify-to-Discord relay patterns
+- `Spytify`
+  - useful reference for the Windows direction around isolating Spotify audio specifically: https://github.com/spytify/spytify
 
 ## CI/CD
 

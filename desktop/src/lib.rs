@@ -3,7 +3,8 @@ mod backend;
 use backend::{
     discord_invite_url_from_token, ActivityEntry, AppSnapshot, AudioOutputReport, Backend,
     DiscordGuildOption, DiscordRelayReport, DiscordValidationReport, DiscordVoiceChannelOption,
-    HealthTile, Settings, DEFAULT_AUDIO_OUTPUT_NAME, DISCORD_INVITE_PERMISSIONS,
+    HealthTile, Settings, DEFAULT_AUDIO_OUTPUT_NAME, DEFAULT_CAPTURE_TARGET,
+    DISCORD_INVITE_PERMISSIONS,
 };
 use directories::BaseDirs;
 use slint::{Model, ModelRc, SharedString, VecModel};
@@ -162,7 +163,7 @@ fn install_linux_desktop_entry() -> Result<(), String> {
     }
 
     let desktop_file = format!(
-        "[Desktop Entry]\nType=Application\nVersion=1.0\nName=Bardic Chord\nComment=A mythical desktop relay for routing Spotify into Discord voice.\nExec={}\nIcon={}\nTerminal=false\nCategories=AudioVideo;Utility;\nStartupWMClass={}\nStartupNotify=true\n",
+        "[Desktop Entry]\nType=Application\nVersion=1.0\nName=Bardic Chord\nComment=A mythical desktop relay for routing desktop audio into Discord voice.\nExec={}\nIcon={}\nTerminal=false\nCategories=AudioVideo;Utility;\nStartupWMClass={}\nStartupNotify=true\n",
         executable.display(),
         LINUX_APP_ID,
         LINUX_APP_ID,
@@ -511,6 +512,14 @@ fn bind_callbacks(
                                 .output_name
                                 .clone()
                                 .unwrap_or_else(|| DEFAULT_AUDIO_OUTPUT_NAME.into());
+                            let capture_target = {
+                                let value = ui.get_capture_target();
+                                if value.trim().is_empty() {
+                                    DEFAULT_CAPTURE_TARGET.to_string()
+                                } else {
+                                    value.to_string()
+                                }
+                            };
                             match snapshot {
                                 Ok(snapshot) => apply_snapshot(&ui, &snapshot),
                                 Err(error) => ui.set_save_message(error.into()),
@@ -520,15 +529,15 @@ fn bind_callbacks(
                             ui.set_current_page(3);
                             ui.set_save_message(
                                 format!(
-                                    "Audio output is ready. Route Spotify to `{output_name}` in your system sound settings, then press Start Party."
+                                    "Audio is ready. Route or attach `{capture_target}` to `{output_name}` if needed, then press Start Party."
                                 )
                                 .into(),
                             );
                             if !ui.get_relay_active() {
-                                ui.set_relay_status_title("Route Spotify next".into());
+                                ui.set_relay_status_title("Prepare your app next".into());
                                 ui.set_relay_status_body(
                                     format!(
-                                        "Bardic Chord prepared `{output_name}` successfully.\n\nIf Spotify is already playing, Bardic Chord will try to move it there automatically. If not, open your system sound settings or volume mixer and route Spotify to that output."
+                                        "Bardic Chord prepared `{output_name}` successfully.\n\nIf `{capture_target}` is already playing, Bardic Chord will try to move or attach to it automatically when possible. If not, open your system sound settings or volume mixer and route `{capture_target}` to that output."
                                     )
                                     .into(),
                                 );
@@ -841,6 +850,7 @@ fn settings_from_ui(ui: &AppWindow) -> Settings {
         guild_id: ui.get_guild_id().to_string(),
         voice_channel_id: ui.get_voice_channel_id().to_string(),
         audio_output_name: ui.get_audio_output_name().to_string(),
+        capture_target: ui.get_capture_target().to_string(),
         bot_display_name: ui.get_bot_display_name().to_string(),
     }
 }
@@ -852,6 +862,7 @@ fn apply_snapshot(ui: &AppWindow, snapshot: &AppSnapshot) {
     ui.set_guild_id(snapshot.settings.guild_id.clone().into());
     ui.set_voice_channel_id(snapshot.settings.voice_channel_id.clone().into());
     ui.set_audio_output_name(snapshot.settings.audio_output_name.clone().into());
+    ui.set_capture_target(snapshot.settings.capture_target.clone().into());
     ui.set_bot_display_name(snapshot.settings.bot_display_name.clone().into());
     apply_snapshot_metadata(ui, snapshot);
     sync_discord_picker_ids(ui);
@@ -995,6 +1006,7 @@ fn apply_relay_report(ui: &AppWindow, report: &DiscordRelayReport) {
 }
 
 fn refresh_editor_derived(ui: &AppWindow) {
+    let required_count = 6;
     let completion_count = [
         ui.get_discord_bot_token(),
         if route_ready_from_ui(ui) {
@@ -1003,6 +1015,7 @@ fn refresh_editor_derived(ui: &AppWindow) {
             SharedString::default()
         },
         ui.get_audio_output_name(),
+        ui.get_capture_target(),
         ui.get_bot_display_name(),
         if ui.get_audio_prepared() {
             SharedString::from("ready")
@@ -1016,10 +1029,12 @@ fn refresh_editor_derived(ui: &AppWindow) {
 
     let bot_display_name = ui.get_bot_display_name();
     let audio_output_name = ui.get_audio_output_name();
+    let capture_target = ui.get_capture_target();
     let voice_channel_id = ui.get_voice_channel_id();
 
     let companion = non_empty(bot_display_name.as_str()).unwrap_or("the bardic relay");
     let output = non_empty(audio_output_name.as_str()).unwrap_or(DEFAULT_AUDIO_OUTPUT_NAME);
+    let target = non_empty(capture_target.as_str()).unwrap_or(DEFAULT_CAPTURE_TARGET);
     let channel = non_empty(voice_channel_id.as_str()).unwrap_or("the chosen voice channel");
     let preview_suffix = if ui.get_follow_user_enabled() {
         let tracked_user_id = ui.get_tracked_user_id();
@@ -1031,13 +1046,13 @@ fn refresh_editor_derived(ui: &AppWindow) {
 
     ui.set_completion_summary(
         format!(
-            "{completion_count} of 5 setup items are ready. Bardic Chord saves your changes automatically."
+            "{completion_count} of {required_count} setup items are ready. Bardic Chord saves your changes automatically."
         )
         .into(),
     );
     ui.set_preview_line(
         format!(
-            "{companion} will send the local `{output}` output into {channel}{preview_suffix}."
+            "{companion} will send `{target}` through `{output}` into {channel}{preview_suffix}."
         )
         .into(),
     );

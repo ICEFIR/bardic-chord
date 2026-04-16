@@ -70,6 +70,7 @@ export component AppWindow inherits Window {
     in-out property <string> guild-id;
     in-out property <string> voice-channel-id;
     in-out property <string> audio-output-name;
+    in-out property <string> capture-target;
     in-out property <string> bot-display-name;
 
     in-out property <string> preview-line;
@@ -157,7 +158,7 @@ export component AppWindow inherits Window {
                     }
 
                     InfoText {
-                        text: "A simple desktop guide for sending Spotify into a Discord voice channel.";
+                        text: "A simple desktop guide for sending desktop audio into a Discord voice channel.";
                         horizontal-alignment: center;
                     }
 
@@ -332,8 +333,8 @@ export component AppWindow inherits Window {
                                         label: "Desktop Audio";
                                         state: root.audio-prepared ? "Prepared" : "Waiting";
                                         detail: root.audio-prepared
-                                            ? "The local Bardic Chord output is live. Route Spotify to it from your sound settings."
-                                            : "Prepare a local Bardic Chord output, then point Spotify at it in your system mixer.";
+                                            ? "The local Bardic Chord output is live. Route your capture app to it from your sound settings."
+                                            : "Prepare a local Bardic Chord output, then point your capture app at it in your system mixer.";
                                         accent: root.audio-prepared ? #b89cf3 : #5f7b89;
                                     }
                                 }
@@ -506,12 +507,19 @@ export component AppWindow inherits Window {
                                     VerticalBox {
                                         spacing: 12px;
 
-                                        InfoText { text: "Bardic Chord creates a local output on Linux. If Spotify is already playing, Bardic Chord will try to route it automatically. You can still move it from your system sound settings if needed."; }
+                                        InfoText { text: "Bardic Chord prepares the desktop audio path for the app you want to capture. On Linux it creates a local output. On Windows it captures the selected app directly through loopback."; }
 
                                         Text { text: "Audio Output Name"; color: #d7d1c7; }
                                         LineEdit {
                                             text <=> root.audio-output-name;
                                             placeholder-text: "Bardic_Chord";
+                                            edited => { root.draft-changed(); }
+                                        }
+
+                                        Text { text: "App To Capture"; color: #d7d1c7; }
+                                        LineEdit {
+                                            text <=> root.capture-target;
+                                            placeholder-text: "spotify";
                                             edited => { root.draft-changed(); }
                                         }
 
@@ -557,12 +565,12 @@ export component AppWindow inherits Window {
                                     }
 
                                     GroupBox {
-                                        title: "What to Do in Spotify";
+                                        title: "What To Do In The App";
                                         VerticalBox {
                                             spacing: 10px;
-                                            InfoText { text: "1. Open your system sound settings or volume mixer."; }
-                                            InfoText { text: "2. If Spotify does not move automatically, route it to the output shown above."; }
-                                            InfoText { text: "3. Keep Spotify playing through that output while Bardic Chord is live."; }
+                                            InfoText { text: "1. Open the app you want to capture and start playback."; }
+                                            InfoText { text: "2. On Linux, route that app to the prepared output if Bardic Chord does not move it automatically."; }
+                                            InfoText { text: "3. On Windows, keep that app open so loopback capture stays attached."; }
                                             InfoText { text: "4. Return here and start the party."; }
                                         }
                                     }
@@ -577,7 +585,7 @@ export component AppWindow inherits Window {
                                     VerticalBox {
                                         spacing: 12px;
 
-                                        InfoText { text: "Once Spotify is routed to the prepared output, press Start Party. Bardic Chord will keep the local capture and Discord voice session on this machine."; }
+                                        InfoText { text: "Once desktop audio is prepared, press Start Party. Bardic Chord will keep the local capture and Discord voice session on this machine."; }
 
                                         HorizontalBox {
                                             spacing: 12px;
@@ -619,7 +627,7 @@ export component AppWindow inherits Window {
                                             spacing: 10px;
                                             InfoText { text: root.ritual-steps-text; }
                                             Rectangle { height: 1px; background: #31434a; }
-                                            InfoText { text: "If Spotify gets routed back to your speakers or the desktop output is recreated, prepare the output again and then restart the party."; }
+                                            InfoText { text: "If the app gets routed back to your speakers or the desktop output is recreated, prepare the output again and then restart the party."; }
                                         }
                                     }
                                 }
