@@ -51,7 +51,7 @@ jobs:
         run: |
           rustc --version
           cargo --version
-          cargo zigbuild --version
+          command -v cargo-zigbuild
           zig version
 
       - name: Check formatting
@@ -70,7 +70,6 @@ jobs:
         run: cargo xtask release --target windows
 
       - name: Upload build artifacts
-        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: bardic-chord-ci-${{ github.sha }}
