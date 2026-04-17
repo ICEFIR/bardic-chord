@@ -1,0 +1,124 @@
+name: Release
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  release-plz-release:
+    name: Release-plz release
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+      pull-requests: read
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Run release-plz release
+        id: release-plz
+        uses: release-plz/action@v0.5
+        with:
+          command: release
+          config: release-plz.toml
+        env:
+          GITHUB_TOKEN: ${{ secrets.RELEASE_PLZ_TOKEN != '' && secrets.RELEASE_PLZ_TOKEN || github.token }}
+
+      - name: Install Linux build dependencies
+        if: steps.release-plz.outputs.releases_created == 'true'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            gh \
+            jq \
+            libasound2-dev \
+            libdbus-1-dev \
+            libegl1-mesa-dev \
+            libfontconfig1-dev \
+            libgles2-mesa-dev \
+            libpulse-dev \
+            libwayland-dev \
+            libx11-dev \
+            libx11-xcb-dev \
+            libxkbcommon-dev \
+            libxkbcommon-x11-dev \
+            pkg-config \
+            python3-pip
+
+      - name: Install Windows cross target
+        if: steps.release-plz.outputs.releases_created == 'true'
+        run: rustup target add x86_64-pc-windows-gnu
+
+      - name: Install cargo-zigbuild
+        if: steps.release-plz.outputs.releases_created == 'true'
+        run: |
+          python3 -m pip install --user cargo-zigbuild
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
+      - name: Build release archives
+        if: steps.release-plz.outputs.releases_created == 'true'
+        run: cargo xtask release
+
+      - name: Upload packaged artifacts to workflow run
+        if: steps.release-plz.outputs.releases_created == 'true'
+        uses: actions/upload-artifact@v6
+        with:
+          name: bardic-chord-release-${{ github.sha }}
+          path: |
+            dist/*.tar.xz
+            dist/*.tar.xz.sha256
+            dist/*.zip
+            dist/*.zip.sha256
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Upload packaged artifacts to GitHub release
+        if: steps.release-plz.outputs.releases_created == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.RELEASE_PLZ_TOKEN != '' && secrets.RELEASE_PLZ_TOKEN || github.token }}
+          RELEASES_JSON: ${{ steps.release-plz.outputs.releases }}
+        run: |
+          set -euo pipefail
+          tag="$(jq -r '.[0].tag' <<<"$RELEASES_JSON")"
+          gh release upload "$tag" dist/* --repo "$GITHUB_REPOSITORY" --clobber
+
+  release-plz-pr:
+    name: Release-plz PR
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+      pull-requests: write
+    concurrency:
+      group: release-plz-${{ github.ref }}
+      cancel-in-progress: false
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Run release-plz release-pr
+        uses: release-plz/action@v0.5
+        with:
+          command: release-pr
+          config: release-plz.toml
+        env:
+          GITHUB_TOKEN: ${{ secrets.RELEASE_PLZ_TOKEN != '' && secrets.RELEASE_PLZ_TOKEN || github.token }}

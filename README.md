@@ -42,7 +42,7 @@ The current product direction is intentionally simple: capture local app audio w
 | Linux capture | Creates a dedicated local output with `pactl`, captures the monitor stream with `parec`, and relays PCM into Discord |
 | Windows capture | Uses WASAPI per-process loopback capture for the selected app |
 | Local state | Stores settings and logs under `./.bardic-chord/` in the current working directory |
-| Release flow | Builds Linux and Windows GNU release archives from Linux with `cargo xtask release` |
+| Release flow | Uses `release-plz` for release PRs, tags, changelogs, and GitHub releases, then uploads Linux and Windows archives built by `cargo xtask release` |
 
 ## How It Works
 
@@ -166,11 +166,19 @@ Artifacts are written to `dist/`:
 - `bardic-chord-x86_64-pc-windows-gnu.zip`
 - `bardic-chord-x86_64-pc-windows-gnu.zip.sha256`
 
-Release tagging:
+Release flow:
 
-- push code to `main` to run CI
-- run the GitHub Actions workflow `Tag Release` with a version like `v0.1.0`, or push a `v*` tag manually
-- the `Release` workflow rebuilds the archives and uploads them to the GitHub release for that tag
+- merge normal work into `main`
+- GitHub Actions runs `release-plz` and updates or opens a release PR automatically
+- merge the release PR when you want to publish
+- `release-plz` creates the version tag and GitHub release
+- the release workflow rebuilds the Linux and Windows archives and uploads them to that release
+
+Repository setup notes:
+
+- enable GitHub Actions workflow permissions to allow creating and approving pull requests
+- add a `RELEASE_PLZ_TOKEN` secret backed by a fine-grained PAT with `Contents` and `Pull requests` write access
+- using `RELEASE_PLZ_TOKEN` is the recommended setup because GitHub does not trigger normal PR/tag-based workflows from actions that use only the default `GITHUB_TOKEN`
 
 ## CI/CD
 
@@ -179,10 +187,10 @@ GitHub Actions currently covers the repo lifecycle:
 - `CI`
   - runs on pushes to `main` and on pull requests
   - checks formatting, builds the workspace, runs desktop unit tests, and packages Linux and Windows release archives
-- `Tag Release`
-  - manual workflow used to create an annotated `v*` tag from GitHub
 - `Release`
-  - runs on `v*` tag pushes, rebuilds both release archives, uploads workflow artifacts, and publishes GitHub release assets
+  - runs on pushes to `main`
+  - opens or updates a release PR with version and changelog changes
+  - when the release PR is merged, creates the tag and GitHub release, rebuilds both release archives, and uploads the release assets
 
 ## Repo Layout
 
@@ -196,6 +204,10 @@ GitHub Actions currently covers the repo lifecycle:
   - Slint controller wiring
 - `desktop/ui/app.slint`
   - guided desktop UI
+- `release-plz.toml`
+  - release-plz configuration for changelog, tags, and release PR behavior
+- `CHANGELOG.md`
+  - project changelog maintained by release-plz
 - `xtask/`
   - release packaging automation
 
