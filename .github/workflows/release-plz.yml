@@ -54,6 +54,8 @@ jobs:
         with:
           command: release
           config: release-plz.toml
+          manifest_path: desktop/Cargo.toml
+          verbose: true
         env:
           GITHUB_TOKEN: ${{ secrets.RELEASE_PLZ_TOKEN != '' && secrets.RELEASE_PLZ_TOKEN || github.token }}
 
@@ -136,5 +138,7 @@ jobs:
         with:
           command: release-pr
           config: release-plz.toml
+          manifest_path: desktop/Cargo.toml
+          verbose: true
         env:
           GITHUB_TOKEN: ${{ secrets.RELEASE_PLZ_TOKEN != '' && secrets.RELEASE_PLZ_TOKEN || github.token }}
