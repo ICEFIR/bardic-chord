@@ -1,85 +1,121 @@
 # Bardic Chord
 
-Bardic Chord is an open-source, cross-platform Rust desktop experiment for routing desktop app audio into Discord voice. The current app uses a native Slint shell and a guided setup flow built around local desktop-audio capture instead of a Spotify Connect receiver.
+<p align="center">
+  <img src="./banner.png" alt="Bardic Chord banner" width="900">
+</p>
 
-## Current State
+<p align="center">
+  <strong>Route desktop audio into Discord voice with a guided local-first ritual.</strong>
+</p>
 
-- native Slint desktop UI with a four-step wizard: `Welcome`, `Discord`, `Desktop Audio`, `Launch`
-- local settings and logs stored under `./.bardic-chord/` in the current working directory
-- Discord validation and voice relay runtime backed by `serenity` and `songbird`
-- Linux desktop-audio backend that creates a local null sink with `pactl` and captures it with `parec`
-- Windows desktop-audio backend that captures the selected app directly through WASAPI process loopback
-- live PCM bridge from that local Bardic Chord output into Discord voice
+<p align="center">
+  Bardic Chord is a Rust desktop app with a native Slint UI that helps a user connect a Discord bot,
+  choose an app to capture, and relay that audio into a Discord voice channel.
+</p>
 
-For the current POC, the Discord bot token is stored in Bardic Chord's local config file on the user's machine. It is not hard-coded into the binary, and it is not using OS keychain storage yet.
+<p align="center">
+  <a href="https://github.com/ICEFIR/bardic-chord/actions/workflows/ci.yml"><img alt="CI" src="https://github.com/ICEFIR/bardic-chord/actions/workflows/ci.yml/badge.svg"></a>
+  <a href="https://github.com/ICEFIR/bardic-chord/releases"><img alt="Latest Release" src="https://img.shields.io/github/v/release/ICEFIR/bardic-chord?display_name=tag"></a>
+  <a href="./LICENSE"><img alt="License" src="https://img.shields.io/github/license/ICEFIR/bardic-chord"></a>
+  <img alt="Rust" src="https://img.shields.io/badge/Rust-stable-orange">
+  <img alt="UI" src="https://img.shields.io/badge/UI-Slint-6c5ce7">
+  <img alt="Discord Voice" src="https://img.shields.io/badge/Discord-voice%20relay-5865F2">
+</p>
 
-## Why The Flow Changed
+## Why This Exists
 
-The previous experiment relied on `librespot` as a Spotify Connect receiver. That path is no longer the active product direction for this repo.
+Most Discord music bots feel remote, brittle, or overbuilt for a private hangout. Bardic Chord takes a different approach:
 
-The current repo now prefers a local capture path:
+- the app runs on the user's machine
+- audio stays local until it is relayed into Discord voice
+- setup is guided through a desktop UI instead of scattered terminal steps
+- Linux and Windows use native capture paths instead of trying to impersonate a Spotify Connect device
 
-1. preparing the desktop audio path
-2. capturing the selected app locally
-3. relaying the PCM stream into Discord voice
+The current product direction is intentionally simple: capture local app audio well, route it clearly, and make the setup feel approachable.
 
-On Linux that means a dedicated local output plus monitor capture. On Windows that means direct process loopback for the selected app process. This keeps the UX aligned while avoiding the unstable Spotify Connect receiver path.
+## Feature Snapshot
 
-## Repo Layout
+| Area | What Bardic Chord does today |
+| --- | --- |
+| Guided setup | Walks the user through `Welcome`, `Discord`, `Desktop Audio`, and `Launch` |
+| Discord | Validates a bot token, discovers guilds and voice channels, and joins voice through `serenity` + `songbird` |
+| Linux capture | Creates a dedicated local output with `pactl`, captures the monitor stream with `parec`, and relays PCM into Discord |
+| Windows capture | Uses WASAPI per-process loopback capture for the selected app |
+| Local state | Stores settings and logs under `./.bardic-chord/` in the current working directory |
+| Release flow | Builds Linux and Windows GNU release archives from Linux with `cargo xtask release` |
 
-- `Cargo.toml`
-  - workspace root
-- `desktop/Cargo.toml`
-  - native app crate
-- `desktop/src/backend.rs`
-  - Discord, local audio-output runtime, config, and relay orchestration
-- `desktop/src/lib.rs`
-  - Slint controller wiring
-- `desktop/ui/app.slint`
-  - guided desktop UI
+## How It Works
 
-## Current Flow
+```mermaid
+flowchart LR
+    A[Desktop app audio] --> B{Capture backend}
+    B -->|Linux| C[Null sink + monitor capture]
+    B -->|Windows| D[WASAPI process loopback]
+    C --> E[PCM bridge]
+    D --> E
+    E --> F[Songbird voice runtime]
+    F --> G[Discord voice channel]
+```
+
+## The User Flow
 
 1. Paste the Discord bot token.
-2. Open the generated Discord authorize page if the bot is not in the server yet.
+2. Open the generated bot authorize page if the bot is not in the server yet.
 3. Choose the Discord server and voice channel.
-4. Choose the app you want to capture.
+4. Choose the desktop app you want Bardic Chord to capture.
 5. Prepare desktop audio.
-6. On Linux, route that app to the Bardic Chord output if needed. On Windows, keep the app open so loopback capture can attach to it.
-7. Start the party so Bardic Chord joins the voice channel and forwards the local audio stream.
+6. Route the app to the Bardic Chord output on Linux, or keep the target app open on Windows so loopback capture can attach.
+7. Start the party so Bardic Chord joins voice and forwards the local audio stream.
 
-## Linux Backend
+## Platform Status
 
-The current implemented capture backend is Linux-first:
+| Platform | Status | Notes |
+| --- | --- | --- |
+| Linux x86_64 | Working | Uses PulseAudio or PipeWire-compatible null sink + monitor capture |
+| Windows x86_64 GNU | Working | Uses WASAPI process loopback; cross-built from Linux with `cargo-zigbuild` |
+| Linux ARM64 | Planned | Best added through a native ARM64 runner |
+| macOS | Planned | Needs a native capture backend that fits the same flow |
 
-- create a local null sink with `pactl load-module module-null-sink`
-- capture the sink's monitor stream with `parec`
-- convert `s16le` stereo samples to float PCM
-- feed that PCM into Songbird's raw input adapter
+## Current Tech Stack
 
-This gives Linux a dedicated Bardic Chord output that can be selected from PipeWire or PulseAudio-compatible sound settings. The current Linux flow also attempts to move the selected app into that output automatically when the stream is visible.
-The selected app target is used to decide which stream Bardic Chord should try to move automatically.
+- `slint`
+  - native desktop UI
+- `serenity`
+  - Discord API and gateway client
+- `songbird`
+  - Discord voice transport and playback runtime
+- `tokio`
+  - async runtime
+- `reqwest` + `rustls`
+  - network stack and validation requests
+- `symphonia`
+  - PCM media/input support for the relay path
+- `wasapi`
+  - Windows application loopback capture
 
-## Windows Backend
+## Quick Start For Users
 
-The Windows path now uses WASAPI application loopback capture against the selected target process.
+### Discord permissions
 
-- Bardic Chord looks for the configured app process on prepare
-- it opens a per-process loopback client instead of creating a virtual output device
-- the captured float PCM is forwarded into the same Songbird relay path as Linux
+Current bot permissions integer:
 
-Current caveat:
+```text
+3146752
+```
 
-- the Windows backend is implemented and cross-builds from Linux now work through `cargo-zigbuild`, but the runtime still needs real Windows-side smoke testing before every public release
+Current required permissions:
 
-## macOS
+- `View Channels`
+- `Connect`
+- `Speak`
 
-macOS still needs a native capture backend that fits the same UI if the experiment needs it later.
+### Launch locally
 
-## Discord Bot Notes
+```bash
+cargo run -p bardic-chord
+```
 
-- bot permissions integer: `3146752`
-- current required permissions: `View Channels`, `Connect`, `Speak`
+For the current POC, the Discord bot token is stored in Bardic Chord's local config file on the user's machine. It is not hard-coded into the binary, and it is not using OS keychain storage yet.
 
 ## Development
 
@@ -89,31 +125,27 @@ Check the workspace:
 cargo check
 ```
 
-Run the app:
-
-```bash
-cargo run -p bardic-chord
-```
-
 Run unit tests:
 
 ```bash
 cargo test -p bardic-chord --lib
 ```
 
-Format the crate:
+Format the workspace:
 
 ```bash
 cargo fmt --all
 ```
 
-Build the supported Linux and Windows release targets with one command:
+## Releases
+
+Build both packaged release targets:
 
 ```bash
 cargo xtask release
 ```
 
-Build only one release target:
+Build one target:
 
 ```bash
 cargo xtask release --target linux
@@ -127,45 +159,60 @@ rustup target add x86_64-pc-windows-gnu
 cargo install --locked cargo-zigbuild
 ```
 
-Current packaged release targets in this repo:
+Artifacts are written to `dist/`:
 
-- `x86_64-unknown-linux-gnu`
-- `x86_64-pc-windows-gnu`
-
-Why this matrix is smaller:
-
-- Linux x86_64 is verified locally on this machine.
-- Windows x86_64 uses the GNU target because it cross-builds cleanly from Linux with `cargo-zigbuild`.
-- Linux ARM64 can still be added later through a native ARM64 Linux runner.
-
-Built artifacts are written to `dist/`.
+- `bardic-chord-x86_64-unknown-linux-gnu.tar.xz`
+- `bardic-chord-x86_64-unknown-linux-gnu.tar.xz.sha256`
+- `bardic-chord-x86_64-pc-windows-gnu.zip`
+- `bardic-chord-x86_64-pc-windows-gnu.zip.sha256`
 
 Release tagging:
 
 - push code to `main` to run CI
 - run the GitHub Actions workflow `Tag Release` with a version like `v0.1.0`, or push a `v*` tag manually
-- the `Release` workflow will build both archives and publish them to the GitHub release for that tag
+- the `Release` workflow rebuilds the archives and uploads them to the GitHub release for that tag
 
-## Build Targets
+## CI/CD
 
-The repo is still set up to target these desktop binaries:
+GitHub Actions currently covers the repo lifecycle:
 
-- `x86_64-unknown-linux-gnu`
-- `x86_64-pc-windows-gnu`
-- `x86_64-apple-darwin`
-- `aarch64-apple-darwin`
+- `CI`
+  - runs on pushes to `main` and on pull requests
+  - checks formatting, builds the workspace, runs desktop unit tests, and packages Linux and Windows release archives
+- `Tag Release`
+  - manual workflow used to create an annotated `v*` tag from GitHub
+- `Release`
+  - runs on `v*` tag pushes, rebuilds both release archives, uploads workflow artifacts, and publishes GitHub release assets
 
-Windows targets are configured to use a static CRT via `.cargo/config.toml`.
+## Repo Layout
 
-That does not mean every desktop target is fully self-contained:
+- `Cargo.toml`
+  - workspace root
+- `desktop/Cargo.toml`
+  - native app crate
+- `desktop/src/backend.rs`
+  - Discord, capture, config, and relay orchestration
+- `desktop/src/lib.rs`
+  - Slint controller wiring
+- `desktop/ui/app.slint`
+  - guided desktop UI
+- `xtask/`
+  - release packaging automation
 
-- Windows can be pushed closer to a single self-contained `.exe`
-- Linux still depends on native user-space audio and windowing stacks
-- macOS still has normal platform-native desktop linkage constraints
+## Project Direction
 
-## License
+- keep the setup local-first and simple
+- keep the UX guided and explicit
+- keep the backend Rust-first
+- prefer local audio capture over fragile Spotify Connect receiver workarounds
+- make cross-platform release packaging boring and repeatable
 
-This repository is released under the MIT License. See `LICENSE`.
+## Roadmap
+
+- [ ] add a macOS capture backend
+- [ ] polish screenshots and release-page media
+- [ ] make capture target selection more flexible beyond Spotify defaults
+- [ ] improve release coverage for more architectures
 
 ## Acknowledgements
 
@@ -194,21 +241,6 @@ Bardic Chord builds on and learns from several open-source projects. Thanks to t
 - `Spytify`
   - useful reference for the Windows direction around isolating Spotify audio specifically: https://github.com/spytify/spytify
 
-## CI/CD
+## License
 
-GitHub Actions now covers the basic repo lifecycle:
-
-- `CI`
-  - runs on pushes to `main` and on pull requests
-  - checks formatting, builds the workspace, runs desktop unit tests, and packages Linux and Windows release archives
-- `Tag Release`
-  - manual workflow used to create an annotated `v*` tag from GitHub
-- `Release`
-  - runs on `v*` tag pushes, rebuilds both release archives, uploads workflow artifacts, and publishes the GitHub release assets
-
-## Product Direction
-
-- keep the setup local-first and simple
-- keep the UX guided and explicit
-- keep the backend Rust-first
-- prefer local audio capture over fragile Spotify Connect receiver workarounds
+This repository is released under the MIT License. See `LICENSE`.
