@@ -7,7 +7,7 @@ edition = "2021"
 license = "MIT"
 repository = "https://github.com/ICEFIR/bardic-chord"
 homepage = "https://github.com/ICEFIR/bardic-chord"
-readme = "../README.md"
+readme = "README.md"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
