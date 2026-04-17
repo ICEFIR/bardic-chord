@@ -9,5 +9,5 @@ pr_labels = ["release"]
 publish = false
 
 [[package]]
-name = "bardic-chord"
-publish = true
+name = "xtask"
+release = false
