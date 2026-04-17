@@ -29,7 +29,7 @@ Most Discord music bots feel remote, brittle, or overbuilt for a private hangout
 - the app runs on the user's machine
 - audio stays local until it is relayed into Discord voice
 - setup is guided through a desktop UI instead of scattered terminal steps
-- Linux and Windows use native capture paths instead of trying to impersonate a Spotify Connect device
+- Linux and Windows use native capture paths instead of relying on remote playback-device tricks
 
 The current product direction is intentionally simple: capture local app audio well, route it clearly, and make the setup feel approachable.
 
@@ -216,14 +216,14 @@ GitHub Actions currently covers the repo lifecycle:
 - keep the setup local-first and simple
 - keep the UX guided and explicit
 - keep the backend Rust-first
-- prefer local audio capture over fragile Spotify Connect receiver workarounds
+- prefer local audio capture over fragile remote playback-device workarounds
 - make cross-platform release packaging boring and repeatable
 
 ## Roadmap
 
 - [ ] add a macOS capture backend
 - [ ] polish screenshots and release-page media
-- [ ] make capture target selection more flexible beyond Spotify defaults
+- [ ] make capture target selection more flexible across desktop apps
 - [ ] improve release coverage for more architectures
 
 ## Acknowledgements
@@ -246,12 +246,8 @@ Bardic Chord builds on and learns from several open-source projects. Thanks to t
   - PCM media/input support used in the relay path
 - `wasapi`
   - Windows process loopback capture backend
-- `librespot`
-  - earlier experiments and product direction research around Spotify playback handling
-- `aoede`
-  - earlier reference point while exploring Spotify-to-Discord relay patterns
 - `Spytify`
-  - useful reference for the Windows direction around isolating Spotify audio specifically: https://github.com/spytify/spytify
+  - useful reference for the Windows direction around isolating per-app desktop audio: https://github.com/spytify/spytify
 
 ## License
 
