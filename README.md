@@ -179,6 +179,7 @@ Repository setup notes:
 - enable GitHub Actions workflow permissions to allow creating and approving pull requests
 - add a `RELEASE_PLZ_TOKEN` secret backed by a fine-grained PAT with `Contents` and `Pull requests` write access
 - using `RELEASE_PLZ_TOKEN` is the recommended setup because GitHub does not trigger normal PR/tag-based workflows from actions that use only the default `GITHUB_TOKEN`
+- `main` pushes run the `Release` workflow, while `CI` runs on pull requests only
 
 ## CI/CD
 
