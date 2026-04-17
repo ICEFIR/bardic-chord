@@ -6,7 +6,8 @@ release_always = false
 semver_check = false
 changelog_path = "./CHANGELOG.md"
 pr_labels = ["release"]
+publish = false
 
 [[package]]
-name = "xtask"
-release = false
+name = "bardic-chord"
+publish = true
