@@ -19,7 +19,7 @@ use songbird::{
     EventContext as SongbirdEventContext, EventHandler as SongbirdEventHandler, SerenityInit,
     Songbird, TrackEvent,
 };
-#[cfg(any(target_os = "linux", test))]
+#[cfg(target_os = "linux")]
 use std::collections::HashMap;
 #[cfg(target_os = "linux")]
 use std::process::Stdio;
@@ -49,6 +49,7 @@ const DISCORD_API_BASE: &str = "https://discord.com/api/v10";
 pub const DISCORD_INVITE_PERMISSIONS: &str = "3146752";
 const DISCORD_USER_AGENT: &str = "BardicChord/0.1.0 (+https://github.com/ICEFIR/bardic-chord)";
 const LOCAL_STATE_DIR: &str = ".bardic-chord";
+const WINDOWS_TASKLIST_ARGS: [&str; 3] = ["/fo", "csv", "/nh"];
 const AUDIO_SAMPLE_RATE: u32 = 48_000;
 const AUDIO_CHANNELS: usize = 2;
 const AUDIO_CHANNELS_U32: u32 = 2;
@@ -392,6 +393,9 @@ struct LinuxAudioOutputRuntime {
 #[cfg(target_os = "windows")]
 struct WindowsAudioOutputRuntime {
     stop_signal: Arc<AtomicBool>,
+    capture_target: String,
+    last_error: Arc<StdMutex<Option<String>>>,
+    target_pid: u32,
 }
 
 enum AudioPlatformRuntime {
@@ -853,6 +857,40 @@ impl Backend {
 
         if let Some(runtime) = guard.as_mut() {
             if runtime.task_handle.is_finished() && runtime.report.active {
+                let (capture_target, failure_message) = match &runtime.platform {
+                    #[cfg(target_os = "linux")]
+                    AudioPlatformRuntime::Linux(_) => (
+                        DEFAULT_CAPTURE_TARGET.to_string(),
+                        format!(
+                            "The desktop audio output stopped unexpectedly. Check `{}` and prepare the output again.",
+                            self.paths.log_path().display()
+                        ),
+                    ),
+                    #[cfg(target_os = "windows")]
+                    AudioPlatformRuntime::Windows(windows) => {
+                        let detail = windows
+                            .last_error
+                            .lock()
+                            .ok()
+                            .and_then(|error| error.clone());
+                        let message = match detail {
+                            Some(detail) => format!(
+                                "Windows loopback capture for `{}` (pid {}) stopped: {} Check `{}` and prepare the output again.",
+                                windows.capture_target,
+                                windows.target_pid,
+                                detail,
+                                self.paths.log_path().display()
+                            ),
+                            None => format!(
+                                "Windows loopback capture for `{}` (pid {}) stopped unexpectedly. Check `{}` and prepare the output again.",
+                                windows.capture_target,
+                                windows.target_pid,
+                                self.paths.log_path().display()
+                            ),
+                        };
+                        (windows.capture_target.clone(), message)
+                    }
+                };
                 warn!(
                     log_path = %self.paths.log_path().display(),
                     "local audio capture task finished unexpectedly"
@@ -860,13 +898,10 @@ impl Backend {
                 runtime.report = build_audio_output_report(
                     false,
                     runtime.report.output_name.clone(),
-                    Some(DEFAULT_CAPTURE_TARGET.into()),
+                    Some(capture_target),
                     platform_name().into(),
                     runtime.report.started_at.clone(),
-                    format!(
-                        "The desktop audio output stopped unexpectedly. Check `{}` and prepare the output again.",
-                        self.paths.log_path().display()
-                    ),
+                    failure_message,
                 );
             }
 
@@ -959,6 +994,11 @@ impl Backend {
             let output_name = audio_output_name_or_default(&settings.audio_output_name);
             let capture_target = capture_target_or_default(&settings.capture_target);
             let emitted_sink = EmittedSink::new();
+            info!(
+                capture_target,
+                log_path = %self.paths.log_path().display(),
+                "preparing Windows audio output"
+            );
             let (platform, task_handle) = start_windows_audio_output(
                 emitted_sink.clone(),
                 self.paths.log_path(),
@@ -1897,9 +1937,21 @@ async fn start_windows_audio_output(
     log_path: PathBuf,
     capture_target: String,
 ) -> Result<(AudioPlatformRuntime, JoinHandle<()>), String> {
+    info!(
+        capture_target,
+        log_path = %log_path.display(),
+        "searching for Windows loopback capture target"
+    );
     let target_pid = find_windows_target_process_id(&capture_target).await?;
+    info!(
+        target_pid,
+        capture_target, "resolved Windows capture target process"
+    );
     let stop_signal = Arc::new(AtomicBool::new(false));
     let stop_for_task = stop_signal.clone();
+    let last_error = Arc::new(StdMutex::new(None::<String>));
+    let last_error_for_task = last_error.clone();
+    let capture_target_for_runtime = capture_target.clone();
 
     let task_handle = tokio::task::spawn_blocking(move || {
         if let Err(error) = run_windows_target_loopback(
@@ -1909,6 +1961,9 @@ async fn start_windows_audio_output(
             stop_for_task,
             log_path.clone(),
         ) {
+            if let Ok(mut last_error) = last_error_for_task.lock() {
+                *last_error = Some(error.clone());
+            }
             error!(
                 log_path = %log_path.display(),
                 ?error,
@@ -1918,7 +1973,12 @@ async fn start_windows_audio_output(
     });
 
     Ok((
-        AudioPlatformRuntime::Windows(WindowsAudioOutputRuntime { stop_signal }),
+        AudioPlatformRuntime::Windows(WindowsAudioOutputRuntime {
+            stop_signal,
+            capture_target: capture_target_for_runtime,
+            last_error,
+            target_pid,
+        }),
         task_handle,
     ))
 }
@@ -2068,10 +2128,7 @@ fn run_windows_target_loopback(
 #[cfg(target_os = "windows")]
 async fn find_windows_target_process_id(capture_target: &str) -> Result<u32, String> {
     let output = Command::new("tasklist")
-        .arg("/fo")
-        .arg("csv")
-        .arg("/nh")
-        .arg("/fi")
+        .args(WINDOWS_TASKLIST_ARGS)
         .output()
         .await
         .map_err(|error| {
@@ -2080,6 +2137,12 @@ async fn find_windows_target_process_id(capture_target: &str) -> Result<u32, Str
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        error!(
+            capture_target,
+            status = %output.status,
+            stderr,
+            "tasklist failed while looking for the Windows capture target"
+        );
         return Err(format!(
             "tasklist failed while looking for `{capture_target}`: {stderr}"
         ));
@@ -2087,13 +2150,16 @@ async fn find_windows_target_process_id(capture_target: &str) -> Result<u32, Str
 
     let stdout = String::from_utf8_lossy(&output.stdout);
     parse_windows_tasklist_for_target_pid(stdout.as_ref(), capture_target).ok_or_else(|| {
+        warn!(
+            capture_target,
+            "Windows capture target was not present in tasklist output"
+        );
         format!(
             "Bardic Chord could not find `{capture_target}` on Windows. Open that desktop app and start playback before preparing audio."
         )
     })
 }
 
-#[cfg(target_os = "windows")]
 fn parse_windows_tasklist_for_target_pid(stdout: &str, capture_target: &str) -> Option<u32> {
     let normalized_target = capture_target.trim().to_ascii_lowercase();
     stdout
@@ -2561,6 +2627,22 @@ mod tests {
         ));
         assert!(property_matches_capture_target("firefox.exe", "firefox"));
         assert!(!property_matches_capture_target("firefox", "spotify"));
+    }
+
+    #[test]
+    fn windows_tasklist_args_are_well_formed() {
+        assert_eq!(WINDOWS_TASKLIST_ARGS, ["/fo", "csv", "/nh"]);
+    }
+
+    #[test]
+    fn windows_tasklist_parser_detects_spotify_process() {
+        let stdout = "\"Spotify.exe\",\"1337\",\"Console\",\"1\",\"123,456 K\"\n\
+\"Discord.exe\",\"7331\",\"Console\",\"1\",\"654,321 K\"";
+
+        assert_eq!(
+            parse_windows_tasklist_for_target_pid(stdout, "spotify"),
+            Some(1337)
+        );
     }
 
     #[cfg(target_os = "linux")]

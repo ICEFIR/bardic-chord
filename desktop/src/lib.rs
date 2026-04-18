@@ -21,9 +21,9 @@ use std::{
 };
 use tokio::runtime::{Builder, Handle, Runtime};
 use tokio::time::{sleep, Duration};
-use tracing::info;
 #[cfg(target_os = "linux")]
 use tracing::warn;
+use tracing::{error, info};
 
 slint::include_modules!();
 
@@ -239,7 +239,9 @@ impl Write for SizedLogWriter {
             state.file.seek(SeekFrom::Start(0))?;
         }
 
-        state.file.write(buf)
+        state.file.write_all(buf)?;
+        state.file.flush()?;
+        Ok(buf.len())
     }
 
     fn flush(&mut self) -> io::Result<()> {
@@ -548,6 +550,7 @@ fn bind_callbacks(
                             }
                         }
                         Err(error) => {
+                            error!(%error, "prepare audio output request failed");
                             ui.set_audio_status_title("Desktop audio needs attention".into());
                             ui.set_audio_status_body(error.into());
                         }
@@ -647,6 +650,7 @@ fn bind_callbacks(
 
                 if !audio_prepared {
                     if let Err(error) = backend.prepare_audio_output(settings.clone()).await {
+                        error!(%error, "prepare audio output failed during party launch");
                         audio_error = Some(error);
                     }
                 }
