@@ -1,6 +1,6 @@
 [package]
 name = "bardic-chord"
-version = "0.1.0"
+version = "0.1.1"
 description = "A mythical native desktop console for routing local desktop audio into Discord voice."
 authors = ["ICEFIR"]
 edition = "2021"
