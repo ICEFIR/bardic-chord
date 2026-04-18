@@ -5,6 +5,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.2](https://github.com/ICEFIR/bardic-chord/compare/v0.1.1...v0.1.2) - 2026-04-18
+
+### Other
+
+- Fix CI build for tasklist parser helper
+- Skip release-plz package verification
+
 ## [0.1.1](https://github.com/ICEFIR/bardic-chord/compare/v0.1.0...v0.1.1) - 2026-04-18
 
 ### Other
