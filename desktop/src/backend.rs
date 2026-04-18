@@ -2371,7 +2371,6 @@ fn property_matches_capture_target(value: &str, capture_target: &str) -> bool {
             .contains(normalized_target.trim_end_matches(".exe"))
 }
 
-#[cfg(target_os = "windows")]
 fn process_name_matches_target(process_name: &str, capture_target: &str) -> bool {
     property_matches_capture_target(process_name, capture_target)
 }
