@@ -5,6 +5,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.1](https://github.com/ICEFIR/bardic-chord/compare/v0.2.0...v0.2.1) - 2026-06-18
+
+### Other
+
+- Scan all Windows render sessions
+- Defer Windows session scan after startup
+- Add Windows audio session picker
+- Hide Windows capture monitor probes
+
 ## [0.1.3](https://github.com/ICEFIR/bardic-chord/compare/v0.1.2...v0.1.3) - 2026-04-17
 
 ### Other
