@@ -348,7 +348,11 @@ fn write_sha256(path: &Path) -> Result<()> {
     let bytes = fs::read(path).with_context(|| format!("failed to read {}", path.display()))?;
     let mut hasher = Sha256::new();
     hasher.update(&bytes);
-    let checksum = format!("{:x}", hasher.finalize());
+    let digest = hasher.finalize();
+    let checksum = digest
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
     let checksum_path = PathBuf::from(format!("{}.sha256", path.display()));
     let file_name = path
         .file_name()

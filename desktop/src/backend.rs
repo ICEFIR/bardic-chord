@@ -31,12 +31,13 @@ use std::{
     path::PathBuf,
     sync::{Arc, Condvar, Mutex as StdMutex},
 };
+#[cfg(target_os = "windows")]
+use std::{process::Command as StdCommand, thread};
 #[cfg(target_os = "linux")]
 use tokio::io::AsyncReadExt;
 #[cfg(target_os = "linux")]
-use tokio::process::Child;
+use tokio::process::{Child, Command};
 use tokio::{
-    process::Command,
     sync::{oneshot, Mutex},
     task::JoinHandle,
     time::{timeout, Duration, Instant},
@@ -49,12 +50,23 @@ const DISCORD_API_BASE: &str = "https://discord.com/api/v10";
 pub const DISCORD_INVITE_PERMISSIONS: &str = "3146752";
 const DISCORD_USER_AGENT: &str = "BardicChord/0.1.0 (+https://github.com/ICEFIR/bardic-chord)";
 const LOCAL_STATE_DIR: &str = ".bardic-chord";
+#[cfg(any(target_os = "windows", test))]
 const WINDOWS_TASKLIST_ARGS: [&str; 3] = ["/fo", "csv", "/nh"];
 const AUDIO_SAMPLE_RATE: u32 = 48_000;
 const AUDIO_CHANNELS: usize = 2;
 const AUDIO_CHANNELS_U32: u32 = 2;
 const AUDIO_BUFFER_FRAMES: usize = AUDIO_SAMPLE_RATE as usize * 2;
 const AUDIO_PREFILL_FRAMES: usize = 1_920;
+#[cfg(target_os = "windows")]
+const WINDOWS_SILENCE_WARN_WINDOWS: u32 = 5;
+#[cfg(target_os = "windows")]
+const WINDOWS_CAPTURE_RESCAN_SILENT_WINDOWS: u32 = 8;
+#[cfg(target_os = "windows")]
+const WINDOWS_MONITOR_INTERVAL: Duration = Duration::from_secs(3);
+#[cfg(target_os = "windows")]
+const WINDOWS_PROBE_DURATION: Duration = Duration::from_millis(1_200);
+#[cfg(target_os = "windows")]
+const WINDOWS_ACTIVE_AUDIO_THRESHOLD: f32 = 0.0005;
 pub const DEFAULT_AUDIO_OUTPUT_NAME: &str = "Bardic_Chord";
 pub const DEFAULT_CAPTURE_TARGET: &str = "spotify";
 
@@ -395,7 +407,90 @@ struct WindowsAudioOutputRuntime {
     stop_signal: Arc<AtomicBool>,
     capture_target: String,
     last_error: Arc<StdMutex<Option<String>>>,
-    target_pid: u32,
+    target_pid: Arc<StdMutex<Option<u32>>>,
+    status: Arc<StdMutex<WindowsCaptureStatus>>,
+}
+
+#[cfg(any(target_os = "windows", test))]
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct WindowsProcessCandidate {
+    image_name: String,
+    pid: u32,
+}
+
+#[cfg(target_os = "windows")]
+#[derive(Debug, Clone)]
+struct WindowsCaptureStatus {
+    message: String,
+    target_pid: Option<u32>,
+    candidate_count: usize,
+    audible_count: usize,
+    peak: f32,
+    updated_at: String,
+}
+
+#[cfg(target_os = "windows")]
+impl WindowsCaptureStatus {
+    fn watching(capture_target: &str) -> Self {
+        Self {
+            message: format!(
+                "Windows capture is watching for `{capture_target}`. Open the app and start playback; Bardic Chord will attach automatically."
+            ),
+            target_pid: None,
+            candidate_count: 0,
+            audible_count: 0,
+            peak: 0.0,
+            updated_at: format_now(),
+        }
+    }
+}
+
+#[cfg(target_os = "windows")]
+#[derive(Debug, Clone)]
+struct WindowsProbeResult {
+    candidate: WindowsProcessCandidate,
+    samples_seen: usize,
+    non_silent_samples: usize,
+    zero_value_samples: usize,
+    packets_read: usize,
+    frames_read_total: usize,
+    silent_flag_packets: usize,
+    silent_flag_frames: usize,
+    wait_timeouts: usize,
+    peak: f32,
+    error: Option<String>,
+}
+
+#[cfg(target_os = "windows")]
+impl WindowsProbeResult {
+    fn new(candidate: WindowsProcessCandidate) -> Self {
+        Self {
+            candidate,
+            samples_seen: 0,
+            non_silent_samples: 0,
+            zero_value_samples: 0,
+            packets_read: 0,
+            frames_read_total: 0,
+            silent_flag_packets: 0,
+            silent_flag_frames: 0,
+            wait_timeouts: 0,
+            peak: 0.0,
+            error: None,
+        }
+    }
+
+    fn audible(&self) -> bool {
+        self.error.is_none()
+            && self.non_silent_samples > 0
+            && self.peak > WINDOWS_ACTIVE_AUDIO_THRESHOLD
+    }
+}
+
+#[cfg(target_os = "windows")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum WindowsCaptureRunResult {
+    Stopped,
+    Rescan,
 }
 
 enum AudioPlatformRuntime {
@@ -856,6 +951,26 @@ impl Backend {
         let mut guard = self.runtime_state.audio_output.lock().await;
 
         if let Some(runtime) = guard.as_mut() {
+            #[cfg(target_os = "windows")]
+            if runtime.report.active {
+                let AudioPlatformRuntime::Windows(windows) = &runtime.platform;
+                if let Ok(status) = windows.status.lock() {
+                    let active_pid = status
+                        .target_pid
+                        .map(|pid| format!("pid {pid}"))
+                        .unwrap_or_else(|| "none".into());
+                    runtime.report.message = format!(
+                        "{}\nProbe updated: {}\nActive PID: {}\nCandidates: {}; audible: {}; peak: {:.3}",
+                        status.message,
+                        status.updated_at,
+                        active_pid,
+                        status.candidate_count,
+                        status.audible_count,
+                        status.peak
+                    );
+                }
+            }
+
             if runtime.task_handle.is_finished() && runtime.report.active {
                 let (capture_target, failure_message) = match &runtime.platform {
                     #[cfg(target_os = "linux")]
@@ -873,18 +988,23 @@ impl Backend {
                             .lock()
                             .ok()
                             .and_then(|error| error.clone());
+                        let target_pid = windows.target_pid.lock().ok().and_then(|pid| *pid);
                         let message = match detail {
                             Some(detail) => format!(
-                                "Windows loopback capture for `{}` (pid {}) stopped: {} Check `{}` and prepare the output again.",
+                                "Windows loopback capture for `{}` ({}) stopped: {} Check `{}` and prepare the output again.",
                                 windows.capture_target,
-                                windows.target_pid,
+                                target_pid
+                                    .map(|pid| format!("pid {pid}"))
+                                    .unwrap_or_else(|| "no active pid".into()),
                                 detail,
                                 self.paths.log_path().display()
                             ),
                             None => format!(
-                                "Windows loopback capture for `{}` (pid {}) stopped unexpectedly. Check `{}` and prepare the output again.",
+                                "Windows loopback capture for `{}` ({}) stopped unexpectedly. Check `{}` and prepare the output again.",
                                 windows.capture_target,
-                                windows.target_pid,
+                                target_pid
+                                    .map(|pid| format!("pid {pid}"))
+                                    .unwrap_or_else(|| "no active pid".into()),
                                 self.paths.log_path().display()
                             ),
                         };
@@ -1013,7 +1133,7 @@ impl Backend {
                 platform_name().into(),
                 Some(format_now()),
                 format!(
-                    "Desktop audio is ready on Windows. Bardic Chord found `{capture_target}` and will capture it directly with process loopback while the desktop app is open."
+                    "Windows capture is watching for `{capture_target}`. Start playback whenever you are ready; Bardic Chord will probe matching app processes and attach to the one producing audio."
                 ),
             );
 
@@ -1512,7 +1632,9 @@ impl AppSnapshot {
                 )
             },
             if cfg!(target_os = "windows") {
-                format!("Keep `{capture_target}` running so Bardic Chord can capture its audio.")
+                format!(
+                    "Start playback in `{capture_target}` whenever you are ready; Bardic Chord will attach when it hears audio."
+                )
             } else {
                 format!(
                     "In your system sound settings, make sure `{capture_target}` is routed to that output."
@@ -1619,17 +1741,19 @@ fn audio_output_instructions(active: bool, output_name: &str, capture_target: &s
     if cfg!(target_os = "windows") {
         if active {
             vec![
-                format!("Keep `{capture_target}` open while the party is live."),
                 format!(
-                    "If `{capture_target}` is restarted, prepare audio again so Bardic Chord can reacquire the process."
+                    "Keep `{capture_target}` open when you want music, but playback can start later."
+                ),
+                format!(
+                    "Bardic Chord keeps probing matching Windows processes and attaches to the one producing audio."
                 ),
                 format!("Then start or restart the party to send `{capture_target}` into Discord."),
             ]
         } else {
             vec![
-                format!("Open `{capture_target}` first."),
+                format!("Open `{capture_target}` before or after preparing audio."),
                 format!(
-                    "Press Prepare Audio Output so Bardic Chord attaches to `{capture_target}` with loopback capture."
+                    "Press Prepare Audio Output so Bardic Chord starts its Windows loopback watcher."
                 ),
                 format!("Then start the party to send `{capture_target}` into Discord."),
             ]
@@ -1942,24 +2066,26 @@ async fn start_windows_audio_output(
         log_path = %log_path.display(),
         "searching for Windows loopback capture target"
     );
-    let target_pid = find_windows_target_process_id(&capture_target).await?;
-    info!(
-        target_pid,
-        capture_target, "resolved Windows capture target process"
-    );
     let stop_signal = Arc::new(AtomicBool::new(false));
     let stop_for_task = stop_signal.clone();
     let last_error = Arc::new(StdMutex::new(None::<String>));
     let last_error_for_task = last_error.clone();
     let capture_target_for_runtime = capture_target.clone();
+    let target_pid = Arc::new(StdMutex::new(None::<u32>));
+    let target_pid_for_task = target_pid.clone();
+    let status = Arc::new(StdMutex::new(WindowsCaptureStatus::watching(
+        &capture_target,
+    )));
+    let status_for_task = status.clone();
 
     let task_handle = tokio::task::spawn_blocking(move || {
-        if let Err(error) = run_windows_target_loopback(
-            target_pid,
-            &capture_target,
+        if let Err(error) = run_windows_capture_monitor(
+            capture_target,
             emitted_sink,
             stop_for_task,
             log_path.clone(),
+            status_for_task,
+            target_pid_for_task,
         ) {
             if let Ok(mut last_error) = last_error_for_task.lock() {
                 *last_error = Some(error.clone());
@@ -1978,9 +2104,208 @@ async fn start_windows_audio_output(
             capture_target: capture_target_for_runtime,
             last_error,
             target_pid,
+            status,
         }),
         task_handle,
     ))
+}
+
+#[cfg(target_os = "windows")]
+fn run_windows_capture_monitor(
+    capture_target: String,
+    emitted_sink: EmittedSink,
+    stop_signal: Arc<AtomicBool>,
+    log_path: PathBuf,
+    status: Arc<StdMutex<WindowsCaptureStatus>>,
+    target_pid: Arc<StdMutex<Option<u32>>>,
+) -> Result<(), String> {
+    info!(
+        capture_target,
+        log_path = %log_path.display(),
+        "Windows loopback capture monitor started"
+    );
+
+    while !stop_signal.load(Ordering::SeqCst) {
+        let candidates = match find_windows_target_process_candidates_sync(&capture_target) {
+            Ok(candidates) => candidates,
+            Err(error) => {
+                warn!(
+                    capture_target,
+                    ?error,
+                    "Windows capture monitor could not enumerate target processes"
+                );
+                update_windows_capture_status(
+                    &status,
+                    WindowsCaptureStatus {
+                        message: format!(
+                            "Windows capture is still watching for `{capture_target}`, but process discovery failed. Check `{}` for details.",
+                            log_path.display()
+                        ),
+                        target_pid: None,
+                        candidate_count: 0,
+                        audible_count: 0,
+                        peak: 0.0,
+                        updated_at: format_now(),
+                    },
+                );
+                thread::sleep(WINDOWS_MONITOR_INTERVAL);
+                continue;
+            }
+        };
+
+        if candidates.is_empty() {
+            if let Ok(mut pid) = target_pid.lock() {
+                *pid = None;
+            }
+            update_windows_capture_status(
+                &status,
+                WindowsCaptureStatus {
+                    message: format!(
+                        "Windows capture is watching for `{capture_target}`. Open the app and start playback; Bardic Chord will attach automatically."
+                    ),
+                    target_pid: None,
+                    candidate_count: 0,
+                    audible_count: 0,
+                    peak: 0.0,
+                    updated_at: format_now(),
+                },
+            );
+            info!(
+                capture_target,
+                "Windows capture monitor found no matching target processes"
+            );
+            thread::sleep(WINDOWS_MONITOR_INTERVAL);
+            continue;
+        }
+
+        let probe_results =
+            probe_windows_capture_candidates(&candidates, &capture_target, stop_signal.clone());
+        let audible = probe_results
+            .iter()
+            .filter(|result| result.audible())
+            .collect::<Vec<_>>();
+        let best = audible
+            .iter()
+            .max_by(|left, right| left.peak.total_cmp(&right.peak))
+            .copied();
+
+        log_windows_probe_results(&capture_target, &probe_results, best);
+
+        let Some(best) = best else {
+            if let Ok(mut pid) = target_pid.lock() {
+                *pid = None;
+            }
+            update_windows_capture_status(
+                &status,
+                WindowsCaptureStatus {
+                    message: format!(
+                        "`{capture_target}` is open, but Bardic Chord does not hear app audio yet. Watching {} matching process{}.",
+                        candidates.len(),
+                        plural_suffix(candidates.len())
+                    ),
+                    target_pid: None,
+                    candidate_count: candidates.len(),
+                    audible_count: 0,
+                    peak: 0.0,
+                    updated_at: format_now(),
+                },
+            );
+            thread::sleep(WINDOWS_MONITOR_INTERVAL);
+            continue;
+        };
+
+        let selected = best.candidate.clone();
+        if let Ok(mut pid) = target_pid.lock() {
+            *pid = Some(selected.pid);
+        }
+        update_windows_capture_status(
+            &status,
+            WindowsCaptureStatus {
+                message: format!(
+                    "Capturing `{capture_target}` from {} pid {}. Audible matches: {} of {}; peak {:.3}.",
+                    selected.image_name,
+                    selected.pid,
+                    audible.len(),
+                    candidates.len(),
+                    best.peak
+                ),
+                target_pid: Some(selected.pid),
+                candidate_count: candidates.len(),
+                audible_count: audible.len(),
+                peak: best.peak,
+                updated_at: format_now(),
+            },
+        );
+
+        match run_windows_target_loopback(
+            selected.pid,
+            &capture_target,
+            emitted_sink.clone(),
+            stop_signal.clone(),
+            log_path.clone(),
+            status.clone(),
+        ) {
+            Ok(WindowsCaptureRunResult::Stopped) => break,
+            Ok(WindowsCaptureRunResult::Rescan) => {
+                if let Ok(mut pid) = target_pid.lock() {
+                    *pid = None;
+                }
+                update_windows_capture_status(
+                    &status,
+                    WindowsCaptureStatus {
+                        message: format!(
+                            "`{capture_target}` went quiet. Bardic Chord is scanning matching processes again."
+                        ),
+                        target_pid: None,
+                        candidate_count: candidates.len(),
+                        audible_count: 0,
+                        peak: 0.0,
+                        updated_at: format_now(),
+                    },
+                );
+            }
+            Err(error) => {
+                warn!(
+                    selected_pid = selected.pid,
+                    capture_target,
+                    ?error,
+                    "Windows selected loopback capture failed; returning to process monitor"
+                );
+                update_windows_capture_status(
+                    &status,
+                    WindowsCaptureStatus {
+                        message: format!(
+                            "Capture from `{capture_target}` pid {} stopped. Bardic Chord is scanning again.",
+                            selected.pid
+                        ),
+                        target_pid: None,
+                        candidate_count: candidates.len(),
+                        audible_count: audible.len(),
+                        peak: best.peak,
+                        updated_at: format_now(),
+                    },
+                );
+                thread::sleep(WINDOWS_MONITOR_INTERVAL);
+            }
+        }
+    }
+
+    if let Ok(mut pid) = target_pid.lock() {
+        *pid = None;
+    }
+    update_windows_capture_status(
+        &status,
+        WindowsCaptureStatus {
+            message: format!("Windows capture for `{capture_target}` is off."),
+            target_pid: None,
+            candidate_count: 0,
+            audible_count: 0,
+            peak: 0.0,
+            updated_at: format_now(),
+        },
+    );
+    info!(capture_target, "Windows loopback capture monitor stopped");
+    Ok(())
 }
 
 #[cfg(target_os = "windows")]
@@ -1990,7 +2315,8 @@ fn run_windows_target_loopback(
     emitted_sink: EmittedSink,
     stop_signal: Arc<AtomicBool>,
     log_path: PathBuf,
-) -> Result<(), String> {
+    status: Arc<StdMutex<WindowsCaptureStatus>>,
+) -> Result<WindowsCaptureRunResult, String> {
     wasapi::initialize_mta()
         .ok()
         .map_err(|error| format!("failed to initialize Windows audio COM apartment: {error}"))?;
@@ -2032,6 +2358,10 @@ fn run_windows_target_loopback(
     info!(
         target_pid,
         capture_target,
+        sample_rate = AUDIO_SAMPLE_RATE,
+        channels = AUDIO_CHANNELS,
+        sample_bits = 32,
+        buffer_duration_hns = 200_000,
         log_path = %log_path.display(),
         "Windows target loopback capture started"
     );
@@ -2039,8 +2369,17 @@ fn run_windows_target_loopback(
     let mut packet_buffer = vec![0_u8; 65_536];
     let mut samples_seen = 0usize;
     let mut non_silent_samples = 0usize;
+    let mut zero_value_samples = 0usize;
+    let mut packets_read = 0usize;
+    let mut frames_read_total = 0usize;
+    let mut silent_flag_packets = 0usize;
+    let mut silent_flag_frames = 0usize;
+    let mut wait_timeouts = 0usize;
+    let mut empty_packet_polls = 0usize;
     let mut peak = 0.0_f32;
     let mut last_activity_log = Instant::now();
+    let mut consecutive_silent_windows = 0u32;
+    let mut first_audio_logged = false;
 
     loop {
         if stop_signal.load(Ordering::SeqCst) {
@@ -2049,7 +2388,9 @@ fn run_windows_target_loopback(
 
         if let Err(error) = event_handle.wait_for_event(250) {
             let message = error.to_string();
-            if !message.to_ascii_lowercase().contains("timeout") {
+            if message.to_ascii_lowercase().contains("timeout") {
+                wait_timeouts += 1;
+            } else {
                 warn!(
                     ?error,
                     "Windows loopback event wait returned a non-timeout warning"
@@ -2057,6 +2398,7 @@ fn run_windows_target_loopback(
             }
         }
 
+        let mut read_packet_this_cycle = false;
         loop {
             let Some(next_frames) = capture_client.get_next_packet_size().map_err(|error| {
                 format!("failed to query the Windows loopback packet size: {error}")
@@ -2082,10 +2424,16 @@ fn run_windows_target_loopback(
                 break;
             }
 
+            read_packet_this_cycle = true;
+            packets_read += 1;
+            frames_read_total += frames_read as usize;
             let usable_bytes = frames_read as usize * mem::size_of::<f32>() * AUDIO_CHANNELS;
             let mut frames = Vec::with_capacity(frames_read as usize);
 
             if buffer_info.flags.silent {
+                samples_seen += frames_read as usize;
+                silent_flag_packets += 1;
+                silent_flag_frames += frames_read as usize;
                 frames.resize(frames_read as usize, [0.0, 0.0]);
             } else {
                 for chunk in packet_buffer[..usable_bytes].chunks_exact(8) {
@@ -2093,8 +2441,20 @@ fn run_windows_target_loopback(
                     let right = LittleEndian::read_f32(&chunk[4..8]);
                     let amplitude = left.abs().max(right.abs());
                     samples_seen += 1;
-                    if amplitude > 0.0005 {
+                    if amplitude == 0.0 {
+                        zero_value_samples += 1;
+                    }
+                    if amplitude > WINDOWS_ACTIVE_AUDIO_THRESHOLD {
                         non_silent_samples += 1;
+                        if !first_audio_logged {
+                            info!(
+                                target_pid,
+                                capture_target,
+                                amplitude,
+                                "Windows target loopback detected first non-silent sample"
+                            );
+                            first_audio_logged = true;
+                        }
                     }
                     peak = peak.max(amplitude);
                     frames.push([left, right]);
@@ -2104,17 +2464,95 @@ fn run_windows_target_loopback(
             if !emitted_sink.push_frames(&frames) {
                 info!("windows target loopback capture lost its consumer");
                 let _ = audio_client.stop_stream();
-                return Ok(());
+                return Ok(WindowsCaptureRunResult::Stopped);
             }
         }
 
-        if last_activity_log.elapsed() >= Duration::from_secs(2) && samples_seen > 0 {
+        if !read_packet_this_cycle {
+            empty_packet_polls += 1;
+        }
+
+        if last_activity_log.elapsed() >= Duration::from_secs(2)
+            && (samples_seen > 0 || wait_timeouts > 0 || empty_packet_polls > 0)
+        {
+            let silent_window = samples_seen > 0 && non_silent_samples == 0;
+            if silent_window {
+                consecutive_silent_windows += 1;
+            } else {
+                consecutive_silent_windows = 0;
+            }
+
             info!(
                 samples_seen,
-                non_silent_samples, peak, "windows target loopback activity window"
+                non_silent_samples,
+                zero_value_samples,
+                packets_read,
+                frames_read_total,
+                silent_flag_packets,
+                silent_flag_frames,
+                wait_timeouts,
+                empty_packet_polls,
+                peak,
+                consecutive_silent_windows,
+                target_pid,
+                capture_target,
+                "windows target loopback activity window"
             );
+
+            if consecutive_silent_windows == WINDOWS_SILENCE_WARN_WINDOWS
+                || (consecutive_silent_windows > WINDOWS_SILENCE_WARN_WINDOWS
+                    && consecutive_silent_windows % (WINDOWS_SILENCE_WARN_WINDOWS * 3) == 0)
+            {
+                warn!(
+                    target_pid,
+                    capture_target,
+                    consecutive_silent_windows,
+                    log_path = %log_path.display(),
+                    "Windows target loopback has only produced silence; confirm the selected app process is the one playing audio and that the app is not muted in Windows volume mixer"
+                );
+            }
+
+            update_windows_capture_status(
+                &status,
+                WindowsCaptureStatus {
+                    message: if silent_window {
+                        format!(
+                            "`{capture_target}` pid {target_pid} is attached but currently silent. Bardic Chord will rescan if playback moved to another process."
+                        )
+                    } else {
+                        format!(
+                            "Capturing `{capture_target}` from pid {target_pid}. Peak {:.3}.",
+                            peak
+                        )
+                    },
+                    target_pid: Some(target_pid),
+                    candidate_count: 1,
+                    audible_count: usize::from(!silent_window),
+                    peak,
+                    updated_at: format_now(),
+                },
+            );
+
+            if consecutive_silent_windows >= WINDOWS_CAPTURE_RESCAN_SILENT_WINDOWS {
+                info!(
+                    target_pid,
+                    capture_target,
+                    consecutive_silent_windows,
+                    "Windows target loopback stayed silent long enough to trigger process rescan"
+                );
+                let _ = audio_client.stop_stream();
+                return Ok(WindowsCaptureRunResult::Rescan);
+            }
+
             samples_seen = 0;
             non_silent_samples = 0;
+            zero_value_samples = 0;
+            packets_read = 0;
+            frames_read_total = 0;
+            silent_flag_packets = 0;
+            silent_flag_frames = 0;
+            wait_timeouts = 0;
+            empty_packet_polls = 0;
             peak = 0.0;
             last_activity_log = Instant::now();
         }
@@ -2122,15 +2560,26 @@ fn run_windows_target_loopback(
 
     let _ = audio_client.stop_stream();
     info!(capture_target, "Windows target loopback capture stopped");
-    Ok(())
+    Ok(WindowsCaptureRunResult::Stopped)
 }
 
 #[cfg(target_os = "windows")]
-async fn find_windows_target_process_id(capture_target: &str) -> Result<u32, String> {
-    let output = Command::new("tasklist")
+fn update_windows_capture_status(
+    status: &Arc<StdMutex<WindowsCaptureStatus>>,
+    next: WindowsCaptureStatus,
+) {
+    if let Ok(mut status) = status.lock() {
+        *status = next;
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn find_windows_target_process_candidates_sync(
+    capture_target: &str,
+) -> Result<Vec<WindowsProcessCandidate>, String> {
+    let output = StdCommand::new("tasklist")
         .args(WINDOWS_TASKLIST_ARGS)
         .output()
-        .await
         .map_err(|error| {
             format!("failed to run tasklist while looking for `{capture_target}`: {error}")
         })?;
@@ -2149,23 +2598,274 @@ async fn find_windows_target_process_id(capture_target: &str) -> Result<u32, Str
     }
 
     let stdout = String::from_utf8_lossy(&output.stdout);
-    parse_windows_tasklist_for_target_pid(stdout.as_ref(), capture_target).ok_or_else(|| {
-        warn!(
-            capture_target,
-            "Windows capture target was not present in tasklist output"
-        );
-        format!(
-            "Bardic Chord could not find `{capture_target}` on Windows. Open that desktop app and start playback before preparing audio."
-        )
-    })
+    Ok(parse_windows_tasklist_for_target_candidates(
+        stdout.as_ref(),
+        capture_target,
+    ))
 }
 
+#[cfg(target_os = "windows")]
+fn probe_windows_capture_candidates(
+    candidates: &[WindowsProcessCandidate],
+    capture_target: &str,
+    stop_signal: Arc<AtomicBool>,
+) -> Vec<WindowsProbeResult> {
+    let handles = candidates
+        .iter()
+        .cloned()
+        .map(|candidate| {
+            let capture_target = capture_target.to_string();
+            let stop_signal = stop_signal.clone();
+            thread::spawn(move || {
+                probe_windows_capture_candidate(candidate, &capture_target, stop_signal)
+            })
+        })
+        .collect::<Vec<_>>();
+
+    handles
+        .into_iter()
+        .filter_map(|handle| handle.join().ok())
+        .collect()
+}
+
+#[cfg(target_os = "windows")]
+fn probe_windows_capture_candidate(
+    candidate: WindowsProcessCandidate,
+    capture_target: &str,
+    stop_signal: Arc<AtomicBool>,
+) -> WindowsProbeResult {
+    let mut result = WindowsProbeResult::new(candidate.clone());
+    if stop_signal.load(Ordering::SeqCst) {
+        return result;
+    }
+
+    if let Err(error) = wasapi::initialize_mta().ok() {
+        result.error = Some(format!(
+            "failed to initialize Windows audio COM apartment: {error}"
+        ));
+        return result;
+    }
+
+    let desired_format = WaveFormat::new(
+        32,
+        32,
+        &SampleType::Float,
+        AUDIO_SAMPLE_RATE as usize,
+        2,
+        None,
+    );
+    let mut audio_client = match AudioClient::new_application_loopback_client(candidate.pid, true) {
+        Ok(client) => client,
+        Err(error) => {
+            result.error = Some(format!(
+                "failed to create loopback probe for `{capture_target}` pid {}: {error}",
+                candidate.pid
+            ));
+            return result;
+        }
+    };
+    let stream_mode = StreamMode::EventsShared {
+        autoconvert: true,
+        buffer_duration_hns: 100_000,
+    };
+
+    if let Err(error) =
+        audio_client.initialize_client(&desired_format, &Direction::Capture, &stream_mode)
+    {
+        result.error = Some(format!(
+            "failed to initialize loopback probe for `{capture_target}` pid {}: {error}",
+            candidate.pid
+        ));
+        return result;
+    }
+
+    let event_handle = match audio_client.set_get_eventhandle() {
+        Ok(handle) => handle,
+        Err(error) => {
+            result.error = Some(format!(
+                "failed to create loopback probe event for `{capture_target}` pid {}: {error}",
+                candidate.pid
+            ));
+            return result;
+        }
+    };
+    let capture_client = match audio_client.get_audiocaptureclient() {
+        Ok(client) => client,
+        Err(error) => {
+            result.error = Some(format!(
+                "failed to open loopback probe client for `{capture_target}` pid {}: {error}",
+                candidate.pid
+            ));
+            return result;
+        }
+    };
+
+    if let Err(error) = audio_client.start_stream() {
+        result.error = Some(format!(
+            "failed to start loopback probe for `{capture_target}` pid {}: {error}",
+            candidate.pid
+        ));
+        return result;
+    }
+
+    let started = Instant::now();
+    let mut packet_buffer = vec![0_u8; 65_536];
+    while started.elapsed() < WINDOWS_PROBE_DURATION && !stop_signal.load(Ordering::SeqCst) {
+        if let Err(error) = event_handle.wait_for_event(150) {
+            let message = error.to_string();
+            if message.to_ascii_lowercase().contains("timeout") {
+                result.wait_timeouts += 1;
+            } else {
+                result.error = Some(format!(
+                    "loopback probe wait failed for `{capture_target}` pid {}: {error}",
+                    candidate.pid
+                ));
+                break;
+            }
+        }
+
+        loop {
+            let next_frames = match capture_client.get_next_packet_size() {
+                Ok(Some(frames)) => frames,
+                Ok(None) => break,
+                Err(error) => {
+                    result.error = Some(format!(
+                        "loopback probe packet query failed for `{capture_target}` pid {}: {error}",
+                        candidate.pid
+                    ));
+                    break;
+                }
+            };
+            if next_frames == 0 {
+                break;
+            }
+
+            let needed_bytes = next_frames as usize * mem::size_of::<f32>() * AUDIO_CHANNELS;
+            if packet_buffer.len() < needed_bytes {
+                packet_buffer.resize(needed_bytes, 0);
+            }
+
+            let (frames_read, buffer_info) =
+                match capture_client.read_from_device(&mut packet_buffer[..needed_bytes]) {
+                    Ok(read) => read,
+                    Err(error) => {
+                        result.error = Some(format!(
+                            "loopback probe read failed for `{capture_target}` pid {}: {error}",
+                            candidate.pid
+                        ));
+                        break;
+                    }
+                };
+
+            if frames_read == 0 {
+                break;
+            }
+
+            result.packets_read += 1;
+            result.frames_read_total += frames_read as usize;
+
+            if buffer_info.flags.silent {
+                result.samples_seen += frames_read as usize;
+                result.silent_flag_packets += 1;
+                result.silent_flag_frames += frames_read as usize;
+            } else {
+                let usable_bytes = frames_read as usize * mem::size_of::<f32>() * AUDIO_CHANNELS;
+                for chunk in packet_buffer[..usable_bytes].chunks_exact(8) {
+                    let left = LittleEndian::read_f32(&chunk[0..4]);
+                    let right = LittleEndian::read_f32(&chunk[4..8]);
+                    let amplitude = left.abs().max(right.abs());
+                    result.samples_seen += 1;
+                    if amplitude == 0.0 {
+                        result.zero_value_samples += 1;
+                    }
+                    if amplitude > WINDOWS_ACTIVE_AUDIO_THRESHOLD {
+                        result.non_silent_samples += 1;
+                    }
+                    result.peak = result.peak.max(amplitude);
+                }
+            }
+
+            if result.error.is_some() {
+                break;
+            }
+        }
+
+        if result.error.is_some() {
+            break;
+        }
+    }
+
+    let _ = audio_client.stop_stream();
+    result
+}
+
+#[cfg(target_os = "windows")]
+fn log_windows_probe_results(
+    capture_target: &str,
+    results: &[WindowsProbeResult],
+    best: Option<&WindowsProbeResult>,
+) {
+    let audible_count = results.iter().filter(|result| result.audible()).count();
+    let best_pid = best.map(|result| result.candidate.pid);
+    let best_peak = best.map(|result| result.peak).unwrap_or(0.0);
+
+    info!(
+        capture_target,
+        candidate_count = results.len(),
+        audible_count,
+        best_pid,
+        best_peak,
+        "Windows loopback probe summary"
+    );
+
+    for result in results {
+        info!(
+            capture_target,
+            target_pid = result.candidate.pid,
+            image_name = %result.candidate.image_name,
+            audible = result.audible(),
+            samples_seen = result.samples_seen,
+            non_silent_samples = result.non_silent_samples,
+            zero_value_samples = result.zero_value_samples,
+            packets_read = result.packets_read,
+            frames_read_total = result.frames_read_total,
+            silent_flag_packets = result.silent_flag_packets,
+            silent_flag_frames = result.silent_flag_frames,
+            wait_timeouts = result.wait_timeouts,
+            peak = result.peak,
+            error = ?result.error,
+            "Windows loopback probe candidate result"
+        );
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn plural_suffix(count: usize) -> &'static str {
+    if count == 1 {
+        ""
+    } else {
+        "es"
+    }
+}
+
+#[cfg(test)]
 fn parse_windows_tasklist_for_target_pid(stdout: &str, capture_target: &str) -> Option<u32> {
+    parse_windows_tasklist_for_target_candidates(stdout, capture_target)
+        .into_iter()
+        .next()
+        .map(|candidate| candidate.pid)
+}
+
+#[cfg(any(target_os = "windows", test))]
+fn parse_windows_tasklist_for_target_candidates(
+    stdout: &str,
+    capture_target: &str,
+) -> Vec<WindowsProcessCandidate> {
     let normalized_target = capture_target.trim().to_ascii_lowercase();
     stdout
         .lines()
         .filter(|line| !line.trim().is_empty())
-        .find_map(|line| {
+        .filter_map(|line| {
             let columns = line.split("\",\"").collect::<Vec<_>>();
             if columns.len() < 2 {
                 return None;
@@ -2173,12 +2873,14 @@ fn parse_windows_tasklist_for_target_pid(stdout: &str, capture_target: &str) -> 
 
             let image_name = columns[0].trim_matches('"');
             let pid = columns[1].trim_matches('"').parse::<u32>().ok()?;
-            if process_name_matches_target(image_name, &normalized_target) {
-                Some(pid)
-            } else {
-                None
-            }
+            process_name_matches_target(image_name, &normalized_target).then(|| {
+                WindowsProcessCandidate {
+                    image_name: image_name.to_string(),
+                    pid,
+                }
+            })
         })
+        .collect()
 }
 
 #[cfg(target_os = "linux")]
@@ -2371,6 +3073,7 @@ fn property_matches_capture_target(value: &str, capture_target: &str) -> bool {
             .contains(normalized_target.trim_end_matches(".exe"))
 }
 
+#[cfg(any(target_os = "windows", test))]
 fn process_name_matches_target(process_name: &str, capture_target: &str) -> bool {
     property_matches_capture_target(process_name, capture_target)
 }
@@ -2641,6 +3344,35 @@ mod tests {
         assert_eq!(
             parse_windows_tasklist_for_target_pid(stdout, "spotify"),
             Some(1337)
+        );
+    }
+
+    #[test]
+    fn windows_tasklist_parser_keeps_all_spotify_candidates() {
+        let stdout = "\"Spotify.exe\",\"1337\",\"Console\",\"1\",\"123,456 K\"\n\
+\"Spotify.exe\",\"1338\",\"Console\",\"1\",\"116,000 K\"\n\
+\"SpotifyWidgetProvider.exe\",\"1339\",\"Console\",\"1\",\"28,000 K\"\n\
+\"crashpad_handler.exe\",\"1340\",\"Console\",\"1\",\"1,000 K\"\n\
+\"RuntimeBroker.exe\",\"1341\",\"Console\",\"1\",\"1,000 K\"";
+
+        let candidates = parse_windows_tasklist_for_target_candidates(stdout, "spotify");
+
+        assert_eq!(
+            candidates,
+            vec![
+                WindowsProcessCandidate {
+                    image_name: "Spotify.exe".into(),
+                    pid: 1337,
+                },
+                WindowsProcessCandidate {
+                    image_name: "Spotify.exe".into(),
+                    pid: 1338,
+                },
+                WindowsProcessCandidate {
+                    image_name: "SpotifyWidgetProvider.exe".into(),
+                    pid: 1339,
+                },
+            ]
         );
     }
 

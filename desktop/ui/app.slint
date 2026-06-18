@@ -56,10 +56,10 @@ component StatusCard inherits Rectangle {
 export component AppWindow inherits Window {
     title: "Bardic Chord";
     icon: @image-url("../icons/icon.png");
-    preferred-width: 1440px;
-    preferred-height: 920px;
-    min-width: 1180px;
-    min-height: 760px;
+    preferred-width: 1120px;
+    preferred-height: 740px;
+    min-width: 960px;
+    min-height: 640px;
     background: #0e1416;
 
     in-out property <int> current-page: 0;
@@ -462,7 +462,7 @@ export component AppWindow inherits Window {
                                     VerticalBox {
                                         spacing: 12px;
 
-                                        InfoText { text: "Bardic Chord prepares the desktop audio path for the app you want to capture. On Linux it creates a local output. On Windows it captures the selected app directly through loopback."; }
+                                        InfoText { text: "Bardic Chord prepares the desktop audio path for the app you want to capture. On Linux it creates a local output. On Windows it watches matching app processes and attaches when one produces audio."; }
 
                                         Text { text: "Audio Output Name"; color: #d7d1c7; }
                                         LineEdit {
@@ -525,7 +525,7 @@ export component AppWindow inherits Window {
                                             spacing: 10px;
                                             InfoText { text: "1. Open the app you want to capture and start playback."; }
                                             InfoText { text: "2. On Linux, route that app to the prepared output if Bardic Chord does not move it automatically."; }
-                                            InfoText { text: "3. On Windows, keep that app open so loopback capture stays attached."; }
+                                            InfoText { text: "3. On Windows, playback can start later; Bardic Chord keeps watching and attaches when it hears audio."; }
                                             InfoText { text: "4. Return here and start the party."; }
                                         }
                                     }
