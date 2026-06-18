@@ -3,8 +3,8 @@ mod backend;
 use backend::{
     discord_invite_url_from_token, ActivityEntry, AppSnapshot, AudioOutputReport, Backend,
     DiscordGuildOption, DiscordRelayReport, DiscordValidationReport, DiscordVoiceChannelOption,
-    HealthTile, Settings, DEFAULT_AUDIO_OUTPUT_NAME, DEFAULT_CAPTURE_TARGET,
-    DISCORD_INVITE_PERMISSIONS,
+    HealthTile, Settings, WindowsAudioSessionOption, DEFAULT_AUDIO_OUTPUT_NAME,
+    DEFAULT_CAPTURE_TARGET, DISCORD_INVITE_PERMISSIONS,
 };
 #[cfg(target_os = "linux")]
 use directories::BaseDirs;
@@ -71,8 +71,13 @@ pub fn run() {
     ui.set_discord_guild_id_model(ModelRc::new(VecModel::from(Vec::<SharedString>::new())));
     ui.set_discord_voice_channel_model(ModelRc::new(VecModel::from(Vec::<SharedString>::new())));
     ui.set_discord_voice_channel_id_model(ModelRc::new(VecModel::from(Vec::<SharedString>::new())));
+    ui.set_capture_session_model(ModelRc::new(VecModel::from(Vec::<SharedString>::new())));
+    ui.set_capture_session_id_model(ModelRc::new(VecModel::from(Vec::<SharedString>::new())));
     ui.set_discord_guild_index(0);
     ui.set_discord_voice_channel_index(0);
+    ui.set_capture_session_index(0);
+    ui.set_capture_target_pid(0);
+    ui.set_capture_session_picker_visible(cfg!(target_os = "windows"));
     ui.set_follow_user_enabled(false);
     ui.set_discord_connected(false);
     ui.set_discord_route_ready(false);
@@ -313,6 +318,7 @@ fn bind_callbacks(
     ui.on_draft_changed(move || {
         if let Some(ui) = weak.upgrade() {
             sync_discord_picker_ids(&ui);
+            sync_capture_session_target(&ui);
             normalize_ui_inputs(&ui);
             autosave_current_settings(&ui, &backend_clone);
             refresh_editor_derived(&ui);
@@ -859,6 +865,7 @@ fn settings_from_ui(ui: &AppWindow) -> Settings {
         voice_channel_id: ui.get_voice_channel_id().to_string(),
         audio_output_name: ui.get_audio_output_name().to_string(),
         capture_target: ui.get_capture_target().to_string(),
+        capture_target_pid: ui.get_capture_target_pid() as u32,
         bot_display_name: ui.get_bot_display_name().to_string(),
     }
 }
@@ -871,6 +878,7 @@ fn apply_snapshot(ui: &AppWindow, snapshot: &AppSnapshot) {
     ui.set_voice_channel_id(snapshot.settings.voice_channel_id.clone().into());
     ui.set_audio_output_name(snapshot.settings.audio_output_name.clone().into());
     ui.set_capture_target(snapshot.settings.capture_target.clone().into());
+    ui.set_capture_target_pid(snapshot.settings.capture_target_pid as i32);
     ui.set_bot_display_name(snapshot.settings.bot_display_name.clone().into());
     apply_snapshot_metadata(ui, snapshot);
     sync_discord_picker_ids(ui);
@@ -947,6 +955,11 @@ fn apply_discord_validation(ui: &AppWindow, report: &DiscordValidationReport) {
 
 fn apply_audio_output_report(ui: &AppWindow, report: &AudioOutputReport) {
     ui.set_audio_prepared(report.active);
+    set_capture_session_models(
+        ui,
+        &report.capture_session_options,
+        ui.get_capture_target_pid() as u32,
+    );
     ui.set_audio_status_title(
         if report.active {
             "Desktop audio is ready"
@@ -1132,6 +1145,76 @@ fn sync_discord_picker_ids(ui: &AppWindow) {
             ui.set_voice_channel_id(id);
         }
     }
+}
+
+fn set_capture_session_models(
+    ui: &AppWindow,
+    sessions: &[WindowsAudioSessionOption],
+    selected_pid: u32,
+) {
+    let labels = if sessions.is_empty() {
+        vec![SharedString::from("No Windows audio sessions detected")]
+    } else {
+        sessions
+            .iter()
+            .map(|session| SharedString::from(session.label.clone()))
+            .collect::<Vec<_>>()
+    };
+    let ids = if sessions.is_empty() {
+        vec![SharedString::default()]
+    } else {
+        sessions
+            .iter()
+            .map(|session| {
+                SharedString::from(format!(
+                    "{}|{}|{}",
+                    session.pid, session.process_name, session.display_name
+                ))
+            })
+            .collect::<Vec<_>>()
+    };
+
+    let selected_index = if selected_pid == 0 {
+        sessions
+            .iter()
+            .position(|session| session.audible)
+            .unwrap_or(0)
+    } else {
+        sessions
+            .iter()
+            .position(|session| session.pid == selected_pid)
+            .unwrap_or(0)
+    } as i32;
+
+    ui.set_capture_session_model(ModelRc::new(VecModel::from(labels)));
+    ui.set_capture_session_id_model(ModelRc::new(VecModel::from(ids)));
+    ui.set_capture_session_index(selected_index);
+}
+
+fn sync_capture_session_target(ui: &AppWindow) {
+    let index = ui.get_capture_session_index() as usize;
+    let ids = ui.get_capture_session_id_model();
+    let Some(id) = ids.row_data(index) else {
+        return;
+    };
+    let id = id.to_string();
+    let mut parts = id.splitn(3, '|');
+    let Some(pid) = parts.next().and_then(|value| value.parse::<u32>().ok()) else {
+        return;
+    };
+    if pid == 0 {
+        return;
+    }
+
+    let process_name = parts.next().unwrap_or_default().trim();
+    let display_name = parts.next().unwrap_or_default().trim();
+    ui.set_capture_target_pid(pid as i32);
+    ui.set_capture_target(
+        non_empty(process_name)
+            .or_else(|| non_empty(display_name))
+            .unwrap_or(DEFAULT_CAPTURE_TARGET)
+            .into(),
+    );
 }
 
 fn refresh_runtime_summary(ui: &AppWindow) {

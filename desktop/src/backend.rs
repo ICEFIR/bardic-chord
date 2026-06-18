@@ -47,6 +47,19 @@ use tokio::{
 use tracing::{debug, error, info, warn};
 #[cfg(target_os = "windows")]
 use wasapi::{AudioClient, Direction, SampleType, StreamMode, WaveFormat};
+#[cfg(target_os = "windows")]
+use windows::{
+    core::{Interface, PWSTR},
+    Win32::{
+        Media::Audio::Endpoints::IAudioMeterInformation,
+        Media::Audio::{
+            eConsole, eRender, AudioSessionStateActive, AudioSessionStateExpired,
+            AudioSessionStateInactive, IAudioSessionControl2, IAudioSessionManager2,
+            IMMDeviceEnumerator, ISimpleAudioVolume, MMDeviceEnumerator,
+        },
+        System::Com::{CoCreateInstance, CoTaskMemFree, CLSCTX_ALL},
+    },
+};
 
 const DISCORD_API_BASE: &str = "https://discord.com/api/v10";
 pub const DISCORD_INVITE_PERMISSIONS: &str = "3146752";
@@ -84,6 +97,7 @@ pub struct Settings {
     pub voice_channel_id: String,
     pub audio_output_name: String,
     pub capture_target: String,
+    pub capture_target_pid: u32,
     pub bot_display_name: String,
 }
 
@@ -96,6 +110,7 @@ impl Default for Settings {
             voice_channel_id: String::new(),
             audio_output_name: DEFAULT_AUDIO_OUTPUT_NAME.into(),
             capture_target: DEFAULT_CAPTURE_TARGET.into(),
+            capture_target_pid: 0,
             bot_display_name: "The Amber Minstrel".into(),
         }
     }
@@ -157,6 +172,21 @@ pub struct AudioOutputReport {
     pub started_at: Option<String>,
     pub message: String,
     pub instruction_steps: Vec<String>,
+    pub capture_session_options: Vec<WindowsAudioSessionOption>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct WindowsAudioSessionOption {
+    pub pid: u32,
+    pub process_name: String,
+    pub display_name: String,
+    pub state: String,
+    pub peak: f32,
+    pub volume: f32,
+    pub muted: bool,
+    pub audible: bool,
+    pub label: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -957,6 +987,7 @@ impl Backend {
         if let Some(runtime) = guard.as_mut() {
             #[cfg(target_os = "windows")]
             if runtime.report.active {
+                runtime.report.capture_session_options = windows_audio_session_options_for_report();
                 let AudioPlatformRuntime::Windows(windows) = &runtime.platform;
                 if let Ok(status) = windows.status.lock() {
                     let active_pid = status
@@ -1117,9 +1148,12 @@ impl Backend {
         {
             let output_name = audio_output_name_or_default(&settings.audio_output_name);
             let capture_target = capture_target_or_default(&settings.capture_target);
+            let preferred_pid =
+                (settings.capture_target_pid != 0).then_some(settings.capture_target_pid);
             let emitted_sink = EmittedSink::new();
             info!(
                 capture_target,
+                preferred_pid,
                 log_path = %self.paths.log_path().display(),
                 "preparing Windows audio output"
             );
@@ -1127,6 +1161,7 @@ impl Backend {
                 emitted_sink.clone(),
                 self.paths.log_path(),
                 capture_target.clone(),
+                preferred_pid,
             )
             .await?;
 
@@ -1825,6 +1860,28 @@ fn build_audio_output_report(
         started_at,
         message: message.into(),
         instruction_steps,
+        capture_session_options: windows_audio_session_options_for_report(),
+    }
+}
+
+fn windows_audio_session_options_for_report() -> Vec<WindowsAudioSessionOption> {
+    #[cfg(target_os = "windows")]
+    {
+        match enumerate_windows_render_audio_sessions() {
+            Ok(sessions) => sessions,
+            Err(error) => {
+                warn!(
+                    ?error,
+                    "failed to enumerate Windows render audio sessions for the UI"
+                );
+                Vec::new()
+            }
+        }
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    {
+        Vec::new()
     }
 }
 
@@ -2064,9 +2121,11 @@ async fn start_windows_audio_output(
     emitted_sink: EmittedSink,
     log_path: PathBuf,
     capture_target: String,
+    preferred_pid: Option<u32>,
 ) -> Result<(AudioPlatformRuntime, JoinHandle<()>), String> {
     info!(
         capture_target,
+        preferred_pid,
         log_path = %log_path.display(),
         "searching for Windows loopback capture target"
     );
@@ -2090,6 +2149,7 @@ async fn start_windows_audio_output(
             log_path.clone(),
             status_for_task,
             target_pid_for_task,
+            preferred_pid,
         ) {
             if let Ok(mut last_error) = last_error_for_task.lock() {
                 *last_error = Some(error.clone());
@@ -2122,6 +2182,7 @@ fn run_windows_capture_monitor(
     log_path: PathBuf,
     status: Arc<StdMutex<WindowsCaptureStatus>>,
     target_pid: Arc<StdMutex<Option<u32>>>,
+    preferred_pid: Option<u32>,
 ) -> Result<(), String> {
     info!(
         capture_target,
@@ -2130,7 +2191,7 @@ fn run_windows_capture_monitor(
     );
 
     while !stop_signal.load(Ordering::SeqCst) {
-        let candidates = match find_windows_target_process_candidates_sync(&capture_target) {
+        let mut candidates = match find_windows_target_process_candidates_sync(&capture_target) {
             Ok(candidates) => candidates,
             Err(error) => {
                 warn!(
@@ -2157,6 +2218,32 @@ fn run_windows_capture_monitor(
             }
         };
 
+        if let Some(preferred_pid) = preferred_pid {
+            let has_preferred = candidates
+                .iter()
+                .any(|candidate| candidate.pid == preferred_pid);
+            if !has_preferred {
+                match find_windows_process_candidate_by_pid_sync(preferred_pid) {
+                    Ok(Some(candidate)) => candidates.insert(0, candidate),
+                    Ok(None) => {
+                        warn!(
+                            capture_target,
+                            preferred_pid,
+                            "selected Windows audio session process is no longer present"
+                        );
+                    }
+                    Err(error) => {
+                        warn!(
+                            capture_target,
+                            preferred_pid,
+                            ?error,
+                            "failed to resolve selected Windows audio session process"
+                        );
+                    }
+                }
+            }
+        }
+
         if candidates.is_empty() {
             if let Ok(mut pid) = target_pid.lock() {
                 *pid = None;
@@ -2182,8 +2269,20 @@ fn run_windows_capture_monitor(
             continue;
         }
 
-        let probe_results =
-            probe_windows_capture_candidates(&candidates, &capture_target, stop_signal.clone());
+        let probe_candidates = preferred_pid
+            .and_then(|preferred_pid| {
+                candidates
+                    .iter()
+                    .find(|candidate| candidate.pid == preferred_pid)
+                    .cloned()
+                    .map(|candidate| vec![candidate])
+            })
+            .unwrap_or_else(|| candidates.clone());
+        let probe_results = probe_windows_capture_candidates(
+            &probe_candidates,
+            &capture_target,
+            stop_signal.clone(),
+        );
         let audible = probe_results
             .iter()
             .filter(|result| result.audible())
@@ -2210,9 +2309,9 @@ fn run_windows_capture_monitor(
                 .count();
             let message = if total_samples_seen > 0 && total_non_silent_samples == 0 {
                 format!(
-                    "`{capture_target}` is open, but every loopback probe is silent. Read {total_samples_seen} samples from {} matching process{} with peak 0.000. Check Windows Volume Mixer for muted app audio or an unexpected output device; Bardic Chord will keep watching.",
-                    candidates.len(),
-                    plural_suffix(candidates.len())
+                    "`{capture_target}` is open, but every loopback probe is silent. Read {total_samples_seen} samples from {} selected/matching process{} with peak 0.000. Check Windows Volume Mixer for muted app audio or an unexpected output device; Bardic Chord will keep watching.",
+                    probe_candidates.len(),
+                    plural_suffix(probe_candidates.len())
                 )
             } else if failed_probe_count > 0 {
                 format!(
@@ -2223,9 +2322,9 @@ fn run_windows_capture_monitor(
                 )
             } else {
                 format!(
-                    "`{capture_target}` is open, but Bardic Chord does not hear app audio yet. Watching {} matching process{}.",
-                    candidates.len(),
-                    plural_suffix(candidates.len())
+                    "`{capture_target}` is open, but Bardic Chord does not hear app audio yet. Watching {} selected/matching process{}.",
+                    probe_candidates.len(),
+                    plural_suffix(probe_candidates.len())
                 )
             };
             if let Ok(mut pid) = target_pid.lock() {
@@ -2236,7 +2335,7 @@ fn run_windows_capture_monitor(
                 WindowsCaptureStatus {
                     message,
                     target_pid: None,
-                    candidate_count: candidates.len(),
+                    candidate_count: probe_candidates.len(),
                     audible_count: 0,
                     peak: 0.0,
                     updated_at: format_now(),
@@ -2258,11 +2357,11 @@ fn run_windows_capture_monitor(
                     selected.image_name,
                     selected.pid,
                     audible.len(),
-                    candidates.len(),
+                    probe_candidates.len(),
                     best.peak
                 ),
                 target_pid: Some(selected.pid),
-                candidate_count: candidates.len(),
+                candidate_count: probe_candidates.len(),
                 audible_count: audible.len(),
                 peak: best.peak,
                 updated_at: format_now(),
@@ -2638,6 +2737,29 @@ fn find_windows_target_process_candidates_sync(
 }
 
 #[cfg(target_os = "windows")]
+fn find_windows_process_candidate_by_pid_sync(
+    target_pid: u32,
+) -> Result<Option<WindowsProcessCandidate>, String> {
+    let output = StdCommand::new("tasklist")
+        .args(WINDOWS_TASKLIST_ARGS)
+        .creation_flags(CREATE_NO_WINDOW)
+        .output()
+        .map_err(|error| {
+            format!("failed to run tasklist while looking for pid {target_pid}: {error}")
+        })?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        return Err(format!(
+            "tasklist failed while looking for pid {target_pid}: {stderr}"
+        ));
+    }
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    Ok(parse_windows_tasklist_for_pid(stdout.as_ref(), target_pid))
+}
+
+#[cfg(target_os = "windows")]
 fn probe_windows_capture_candidates(
     candidates: &[WindowsProcessCandidate],
     capture_target: &str,
@@ -2914,6 +3036,199 @@ fn parse_windows_tasklist_for_target_candidates(
             })
         })
         .collect()
+}
+
+#[cfg(any(target_os = "windows", test))]
+fn parse_windows_tasklist_for_pid(
+    stdout: &str,
+    target_pid: u32,
+) -> Option<WindowsProcessCandidate> {
+    stdout
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .filter_map(parse_windows_tasklist_process_line)
+        .find(|candidate| candidate.pid == target_pid)
+}
+
+#[cfg(any(target_os = "windows", test))]
+fn parse_windows_tasklist_process_line(line: &str) -> Option<WindowsProcessCandidate> {
+    let columns = line.split("\",\"").collect::<Vec<_>>();
+    if columns.len() < 2 {
+        return None;
+    }
+    let image_name = columns[0].trim_matches('"').to_string();
+    let pid = columns[1].trim_matches('"').parse::<u32>().ok()?;
+    Some(WindowsProcessCandidate { image_name, pid })
+}
+
+#[cfg(target_os = "windows")]
+fn enumerate_windows_render_audio_sessions() -> Result<Vec<WindowsAudioSessionOption>, String> {
+    wasapi::initialize_mta().ok().map_err(|error| {
+        format!("failed to initialize COM for audio session discovery: {error}")
+    })?;
+
+    let process_map = windows_process_map_sync().unwrap_or_default();
+    let sessions = unsafe {
+        let enumerator: IMMDeviceEnumerator =
+            CoCreateInstance(&MMDeviceEnumerator, None, CLSCTX_ALL)
+                .map_err(|error| format!("failed to create Windows device enumerator: {error}"))?;
+        let device = enumerator
+            .GetDefaultAudioEndpoint(eRender, eConsole)
+            .map_err(|error| format!("failed to open default render endpoint: {error}"))?;
+        let manager: IAudioSessionManager2 = device
+            .Activate(CLSCTX_ALL, None)
+            .map_err(|error| format!("failed to activate audio session manager: {error}"))?;
+        let session_enumerator = manager
+            .GetSessionEnumerator()
+            .map_err(|error| format!("failed to enumerate audio sessions: {error}"))?;
+        let count = session_enumerator
+            .GetCount()
+            .map_err(|error| format!("failed to count audio sessions: {error}"))?;
+        let mut sessions = Vec::new();
+
+        for index in 0..count {
+            let control = match session_enumerator.GetSession(index) {
+                Ok(control) => control,
+                Err(error) => {
+                    warn!(index, ?error, "failed to read Windows audio session");
+                    continue;
+                }
+            };
+            let state = match control.GetState() {
+                Ok(state) if state == AudioSessionStateActive => "active",
+                Ok(state) if state == AudioSessionStateInactive => "inactive",
+                Ok(state) if state == AudioSessionStateExpired => "expired",
+                Ok(_) => "unknown",
+                Err(error) => {
+                    warn!(index, ?error, "failed to read Windows audio session state");
+                    "unknown"
+                }
+            }
+            .to_string();
+            let display_name = pwstr_to_string(control.GetDisplayName().ok());
+            let control2 = control.cast::<IAudioSessionControl2>().ok();
+            let pid = control2
+                .as_ref()
+                .and_then(|control| control.GetProcessId().ok())
+                .unwrap_or(0);
+            let process_name = process_map.get(&pid).cloned().unwrap_or_default();
+            let meter = control.cast::<IAudioMeterInformation>().ok();
+            let peak = meter
+                .as_ref()
+                .and_then(|meter| meter.GetPeakValue().ok())
+                .unwrap_or(0.0);
+            let volume = control
+                .cast::<ISimpleAudioVolume>()
+                .ok()
+                .and_then(|volume| volume.GetMasterVolume().ok())
+                .unwrap_or(0.0);
+            let muted = control
+                .cast::<ISimpleAudioVolume>()
+                .ok()
+                .and_then(|volume| volume.GetMute().ok())
+                .map(|muted| muted.as_bool())
+                .unwrap_or(false);
+            let audible = peak >= WINDOWS_ACTIVE_AUDIO_THRESHOLD && !muted && state == "active";
+            let label_name = non_empty(&process_name)
+                .or_else(|| non_empty(&display_name))
+                .unwrap_or("Unknown session");
+            let label = format!(
+                "{} pid {} | {} | peak {:.3} | vol {:.0}%{}",
+                label_name,
+                pid,
+                state,
+                peak,
+                volume * 100.0,
+                if muted { " | muted" } else { "" }
+            );
+
+            sessions.push(WindowsAudioSessionOption {
+                pid,
+                process_name,
+                display_name,
+                state,
+                peak,
+                volume,
+                muted,
+                audible,
+                label,
+            });
+        }
+
+        sessions
+    };
+
+    let mut sessions = sessions
+        .into_iter()
+        .filter(|session| session.pid != 0)
+        .collect::<Vec<_>>();
+    sessions.sort_by(|left, right| {
+        right
+            .audible
+            .cmp(&left.audible)
+            .then_with(|| right.peak.total_cmp(&left.peak))
+            .then_with(|| left.process_name.cmp(&right.process_name))
+    });
+
+    info!(
+        session_count = sessions.len(),
+        audible_count = sessions.iter().filter(|session| session.audible).count(),
+        "Windows render audio session discovery"
+    );
+    for session in &sessions {
+        info!(
+            pid = session.pid,
+            process_name = %session.process_name,
+            display_name = %session.display_name,
+            state = %session.state,
+            peak = session.peak,
+            volume = session.volume,
+            muted = session.muted,
+            audible = session.audible,
+            "Windows render audio session"
+        );
+    }
+
+    Ok(sessions)
+}
+
+#[cfg(target_os = "windows")]
+fn windows_process_map_sync() -> Result<std::collections::HashMap<u32, String>, String> {
+    let output = StdCommand::new("tasklist")
+        .args(WINDOWS_TASKLIST_ARGS)
+        .creation_flags(CREATE_NO_WINDOW)
+        .output()
+        .map_err(|error| format!("failed to run tasklist while mapping audio sessions: {error}"))?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        return Err(format!(
+            "tasklist failed while mapping audio sessions: {stderr}"
+        ));
+    }
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    Ok(stdout
+        .lines()
+        .filter_map(parse_windows_tasklist_process_line)
+        .map(|candidate| (candidate.pid, candidate.image_name))
+        .collect())
+}
+
+#[cfg(target_os = "windows")]
+fn pwstr_to_string(value: Option<PWSTR>) -> String {
+    let Some(value) = value else {
+        return String::new();
+    };
+    let text = unsafe { value.to_string().unwrap_or_default() };
+    unsafe { CoTaskMemFree(Some(value.0.cast())) };
+    text
+}
+
+#[cfg(target_os = "windows")]
+fn non_empty(value: &str) -> Option<&str> {
+    let value = value.trim();
+    (!value.is_empty()).then_some(value)
 }
 
 #[cfg(target_os = "linux")]
@@ -3407,6 +3722,21 @@ mod tests {
                 },
             ]
         );
+    }
+
+    #[test]
+    fn windows_tasklist_parser_finds_candidate_by_pid() {
+        let stdout = "\"SpotifyLauncher.exe\",\"9908\",\"Console\",\"1\",\"682,420 K\"\n\
+\"Spotify.exe\",\"26740\",\"Console\",\"1\",\"179,000 K\"";
+
+        assert_eq!(
+            parse_windows_tasklist_for_pid(stdout, 26740),
+            Some(WindowsProcessCandidate {
+                image_name: "Spotify.exe".into(),
+                pid: 26740,
+            })
+        );
+        assert_eq!(parse_windows_tasklist_for_pid(stdout, 123), None);
     }
 
     #[cfg(target_os = "linux")]

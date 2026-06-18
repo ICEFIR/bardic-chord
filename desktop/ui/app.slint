@@ -71,6 +71,7 @@ export component AppWindow inherits Window {
     in-out property <string> voice-channel-id;
     in-out property <string> audio-output-name;
     in-out property <string> capture-target;
+    in-out property <int> capture-target-pid: 0;
     in-out property <string> bot-display-name;
 
     in-out property <string> preview-line;
@@ -91,6 +92,10 @@ export component AppWindow inherits Window {
     in-out property <string> audio-status-title;
     in-out property <string> audio-status-body;
     in-out property <string> audio-instructions-text;
+    in-out property <bool> capture-session-picker-visible: false;
+    in-out property <[string]> capture-session-model: [];
+    in-out property <[string]> capture-session-id-model: [];
+    in-out property <int> capture-session-index: 0;
 
     in-out property <string> discord-status-title;
     in-out property <string> discord-status-body;
@@ -475,7 +480,21 @@ export component AppWindow inherits Window {
                                         LineEdit {
                                             text <=> root.capture-target;
                                             placeholder-text: "spotify";
-                                            edited => { root.draft-changed(); }
+                                            edited => {
+                                                root.capture-target-pid = 0;
+                                                root.capture-session-index = 0;
+                                                root.draft-changed();
+                                            }
+                                        }
+
+                                        if root.capture-session-picker-visible : VerticalBox {
+                                            spacing: 8px;
+                                            Text { text: "Windows Audio Session"; color: #d7d1c7; }
+                                            ComboBox {
+                                                model: root.capture-session-model;
+                                                current-index <=> root.capture-session-index;
+                                                selected => { root.draft-changed(); }
+                                            }
                                         }
 
                                         Text { text: "Bot Display Name"; color: #d7d1c7; }

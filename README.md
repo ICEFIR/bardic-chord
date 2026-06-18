@@ -40,7 +40,7 @@ The current product direction is intentionally simple: capture local app audio w
 | Guided setup | Walks the user through `Welcome`, `Discord`, `Desktop Audio`, and `Launch` |
 | Discord | Validates a bot token, discovers guilds and voice channels, and joins voice through `serenity` + `songbird` |
 | Linux capture | Creates a dedicated local output with `pactl`, captures the monitor stream with `parec`, and relays PCM into Discord |
-| Windows capture | Watches matching app processes, probes them with WASAPI loopback, and captures the one producing audio |
+| Windows capture | Discovers active render sessions, lets the user pick an audible session, probes matching processes with WASAPI loopback, and captures the one producing audio |
 | Local state | Stores settings and logs under `./.bardic-chord/` in the current working directory |
 | Release flow | Uses `release-plz` for release PRs, tags, changelogs, and GitHub releases, then uploads Linux and Windows archives built by `cargo xtask release` |
 
@@ -50,7 +50,7 @@ The current product direction is intentionally simple: capture local app audio w
 flowchart LR
     A[Desktop app audio] --> B{Capture backend}
     B -->|Linux| C[Null sink + monitor capture]
-    B -->|Windows| D[WASAPI process watcher]
+    B -->|Windows| D[Audio session picker + WASAPI process watcher]
     C --> E[PCM bridge]
     D --> E
     E --> F[Songbird voice runtime]
@@ -64,7 +64,7 @@ flowchart LR
 3. Choose the Discord server and voice channel.
 4. Choose the desktop app you want Bardic Chord to capture.
 5. Prepare desktop audio.
-6. Route the app to the Bardic Chord output on Linux, or let the Windows watcher attach when the target app starts producing audio.
+6. Route the app to the Bardic Chord output on Linux, or choose the active Windows audio session and let the watcher attach when the target app starts producing audio.
 7. Start the party so Bardic Chord joins voice and forwards the local audio stream.
 
 ## Platform Status
@@ -72,7 +72,7 @@ flowchart LR
 | Platform | Status | Notes |
 | --- | --- | --- |
 | Linux x86_64 | Working | Uses PulseAudio or PipeWire-compatible null sink + monitor capture |
-| Windows x86_64 GNU | Working | Uses a WASAPI process-loopback watcher; cross-built from Linux with `cargo-zigbuild` |
+| Windows x86_64 GNU | Working | Uses audio-session diagnostics plus a WASAPI process-loopback watcher; cross-built from Linux with `cargo-zigbuild` |
 | Linux ARM64 | Planned | Best added through a native ARM64 runner |
 | macOS | Planned | Needs a native capture backend that fits the same flow |
 
@@ -90,8 +90,8 @@ flowchart LR
   - network stack and validation requests
 - `symphonia`
   - PCM media/input support for the relay path
-- `wasapi`
-  - Windows application loopback probing and capture
+- `wasapi` + `windows`
+  - Windows audio-session diagnostics plus application loopback probing and capture
 
 ## Quick Start For Users
 
