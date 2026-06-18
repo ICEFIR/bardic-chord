@@ -51,13 +51,18 @@ use wasapi::{AudioClient, Direction, SampleType, StreamMode, WaveFormat};
 use windows::{
     core::{Interface, PWSTR},
     Win32::{
+        Devices::FunctionDiscovery::PKEY_Device_FriendlyName,
         Media::Audio::Endpoints::IAudioMeterInformation,
         Media::Audio::{
             eConsole, eRender, AudioSessionStateActive, AudioSessionStateExpired,
-            AudioSessionStateInactive, IAudioSessionControl2, IAudioSessionManager2,
-            IMMDeviceEnumerator, ISimpleAudioVolume, MMDeviceEnumerator,
+            AudioSessionStateInactive, IAudioSessionControl2, IAudioSessionManager2, IMMDevice,
+            IMMDeviceEnumerator, ISimpleAudioVolume, MMDeviceEnumerator, DEVICE_STATE_ACTIVE,
         },
-        System::Com::{CoCreateInstance, CoTaskMemFree, CLSCTX_ALL},
+        System::Com::{
+            CoCreateInstance, CoTaskMemFree,
+            StructuredStorage::{PropVariantClear, PropVariantToStringAlloc},
+            CLSCTX_ALL, STGM_READ,
+        },
     },
 };
 
@@ -181,6 +186,7 @@ pub struct WindowsAudioSessionOption {
     pub pid: u32,
     pub process_name: String,
     pub display_name: String,
+    pub device_name: String,
     pub state: String,
     pub peak: f32,
     pub volume: f32,
@@ -3079,9 +3085,111 @@ fn enumerate_windows_render_audio_sessions() -> Result<Vec<WindowsAudioSessionOp
         let enumerator: IMMDeviceEnumerator =
             CoCreateInstance(&MMDeviceEnumerator, None, CLSCTX_ALL)
                 .map_err(|error| format!("failed to create Windows device enumerator: {error}"))?;
-        let device = enumerator
+        let default_device_id = enumerator
             .GetDefaultAudioEndpoint(eRender, eConsole)
-            .map_err(|error| format!("failed to open default render endpoint: {error}"))?;
+            .ok()
+            .and_then(|device| windows_render_device_id(&device).ok());
+        let devices = enumerator
+            .EnumAudioEndpoints(eRender, DEVICE_STATE_ACTIVE)
+            .map_err(|error| format!("failed to enumerate active render endpoints: {error}"))?;
+        let device_count = devices
+            .GetCount()
+            .map_err(|error| format!("failed to count active render endpoints: {error}"))?;
+        let mut sessions = Vec::new();
+
+        for device_index in 0..device_count {
+            let device = match devices.Item(device_index) {
+                Ok(device) => device,
+                Err(error) => {
+                    warn!(
+                        device_index,
+                        ?error,
+                        "failed to read Windows render endpoint"
+                    );
+                    continue;
+                }
+            };
+            let device_id = windows_render_device_id(&device).unwrap_or_default();
+            let device_name = windows_render_device_name(&device)
+                .unwrap_or_else(|| format!("Render device {}", device_index + 1));
+            let is_default_device = default_device_id
+                .as_ref()
+                .map(|default_id| default_id == &device_id)
+                .unwrap_or(false);
+
+            info!(
+                device_index,
+                device_name = %device_name,
+                is_default_device,
+                "Windows render endpoint discovery"
+            );
+
+            let device_sessions = match enumerate_windows_render_device_sessions(
+                &device,
+                &device_name,
+                is_default_device,
+                &process_map,
+            ) {
+                Ok(device_sessions) => device_sessions,
+                Err(error) => {
+                    warn!(
+                        device_index,
+                        device_name = %device_name,
+                        ?error,
+                        "failed to enumerate Windows render endpoint sessions"
+                    );
+                    continue;
+                }
+            };
+            sessions.extend(device_sessions);
+        }
+
+        sessions
+    };
+
+    let mut sessions = sessions
+        .into_iter()
+        .filter(|session| session.pid != 0)
+        .collect::<Vec<_>>();
+    sessions.sort_by(|left, right| {
+        right
+            .audible
+            .cmp(&left.audible)
+            .then_with(|| right.peak.total_cmp(&left.peak))
+            .then_with(|| left.process_name.cmp(&right.process_name))
+    });
+
+    info!(
+        session_count = sessions.len(),
+        audible_count = sessions.iter().filter(|session| session.audible).count(),
+        "Windows render audio session discovery"
+    );
+    for session in &sessions {
+        info!(
+            pid = session.pid,
+            device_name = %session.device_name,
+            process_name = %session.process_name,
+            display_name = %session.display_name,
+            state = %session.state,
+            peak = session.peak,
+            volume = session.volume,
+            muted = session.muted,
+            audible = session.audible,
+            "Windows render audio session"
+        );
+    }
+
+    Ok(sessions)
+}
+
+#[cfg(target_os = "windows")]
+fn enumerate_windows_render_device_sessions(
+    device: &IMMDevice,
+    device_name: &str,
+    is_default_device: bool,
+    process_map: &std::collections::HashMap<u32, String>,
+) -> Result<Vec<WindowsAudioSessionOption>, String> {
+    let sessions = unsafe {
         let manager: IAudioSessionManager2 = device
             .Activate(CLSCTX_ALL, None)
             .map_err(|error| format!("failed to activate audio session manager: {error}"))?;
@@ -3097,7 +3205,12 @@ fn enumerate_windows_render_audio_sessions() -> Result<Vec<WindowsAudioSessionOp
             let control = match session_enumerator.GetSession(index) {
                 Ok(control) => control,
                 Err(error) => {
-                    warn!(index, ?error, "failed to read Windows audio session");
+                    warn!(
+                        index,
+                        device_name,
+                        ?error,
+                        "failed to read Windows audio session"
+                    );
                     continue;
                 }
             };
@@ -3107,7 +3220,12 @@ fn enumerate_windows_render_audio_sessions() -> Result<Vec<WindowsAudioSessionOp
                 Ok(state) if state == AudioSessionStateExpired => "expired",
                 Ok(_) => "unknown",
                 Err(error) => {
-                    warn!(index, ?error, "failed to read Windows audio session state");
+                    warn!(
+                        index,
+                        device_name,
+                        ?error,
+                        "failed to read Windows audio session state"
+                    );
                     "unknown"
                 }
             }
@@ -3140,9 +3258,11 @@ fn enumerate_windows_render_audio_sessions() -> Result<Vec<WindowsAudioSessionOp
                 .or_else(|| non_empty(&display_name))
                 .unwrap_or("Unknown session");
             let label = format!(
-                "{} pid {} | {} | peak {:.3} | vol {:.0}%{}",
+                "{} pid {} | {}{} | {} | peak {:.3} | vol {:.0}%{}",
                 label_name,
                 pid,
+                device_name,
+                if is_default_device { " default" } else { "" },
                 state,
                 peak,
                 volume * 100.0,
@@ -3153,6 +3273,7 @@ fn enumerate_windows_render_audio_sessions() -> Result<Vec<WindowsAudioSessionOp
                 pid,
                 process_name,
                 display_name,
+                device_name: device_name.to_string(),
                 state,
                 peak,
                 volume,
@@ -3165,38 +3286,26 @@ fn enumerate_windows_render_audio_sessions() -> Result<Vec<WindowsAudioSessionOp
         sessions
     };
 
-    let mut sessions = sessions
-        .into_iter()
-        .filter(|session| session.pid != 0)
-        .collect::<Vec<_>>();
-    sessions.sort_by(|left, right| {
-        right
-            .audible
-            .cmp(&left.audible)
-            .then_with(|| right.peak.total_cmp(&left.peak))
-            .then_with(|| left.process_name.cmp(&right.process_name))
-    });
-
-    info!(
-        session_count = sessions.len(),
-        audible_count = sessions.iter().filter(|session| session.audible).count(),
-        "Windows render audio session discovery"
-    );
-    for session in &sessions {
-        info!(
-            pid = session.pid,
-            process_name = %session.process_name,
-            display_name = %session.display_name,
-            state = %session.state,
-            peak = session.peak,
-            volume = session.volume,
-            muted = session.muted,
-            audible = session.audible,
-            "Windows render audio session"
-        );
-    }
-
     Ok(sessions)
+}
+
+#[cfg(target_os = "windows")]
+fn windows_render_device_id(device: &IMMDevice) -> Result<String, String> {
+    let id = unsafe { device.GetId() }
+        .map_err(|error| format!("failed to read Windows render endpoint id: {error}"))?;
+    Ok(pwstr_to_string(Some(id)))
+}
+
+#[cfg(target_os = "windows")]
+fn windows_render_device_name(device: &IMMDevice) -> Option<String> {
+    unsafe {
+        let store = device.OpenPropertyStore(STGM_READ).ok()?;
+        let mut prop = store.GetValue(&PKEY_Device_FriendlyName).ok()?;
+        let name = PropVariantToStringAlloc(&prop).ok();
+        let _ = PropVariantClear(&mut prop);
+        name.map(|name| pwstr_to_string(Some(name)))
+            .filter(|name| !name.trim().is_empty())
+    }
 }
 
 #[cfg(target_os = "windows")]
