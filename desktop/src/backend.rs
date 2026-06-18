@@ -21,6 +21,8 @@ use songbird::{
 };
 #[cfg(target_os = "linux")]
 use std::collections::HashMap;
+#[cfg(target_os = "windows")]
+use std::os::windows::process::CommandExt;
 #[cfg(target_os = "linux")]
 use std::process::Stdio;
 #[cfg(target_os = "windows")]
@@ -67,6 +69,8 @@ const WINDOWS_MONITOR_INTERVAL: Duration = Duration::from_secs(3);
 const WINDOWS_PROBE_DURATION: Duration = Duration::from_millis(1_200);
 #[cfg(target_os = "windows")]
 const WINDOWS_ACTIVE_AUDIO_THRESHOLD: f32 = 0.0005;
+#[cfg(target_os = "windows")]
+const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 pub const DEFAULT_AUDIO_OUTPUT_NAME: &str = "Bardic_Chord";
 pub const DEFAULT_CAPTURE_TARGET: &str = "spotify";
 
@@ -2192,17 +2196,45 @@ fn run_windows_capture_monitor(
         log_windows_probe_results(&capture_target, &probe_results, best);
 
         let Some(best) = best else {
+            let total_samples_seen = probe_results
+                .iter()
+                .map(|result| result.samples_seen)
+                .sum::<usize>();
+            let total_non_silent_samples = probe_results
+                .iter()
+                .map(|result| result.non_silent_samples)
+                .sum::<usize>();
+            let failed_probe_count = probe_results
+                .iter()
+                .filter(|result| result.error.is_some())
+                .count();
+            let message = if total_samples_seen > 0 && total_non_silent_samples == 0 {
+                format!(
+                    "`{capture_target}` is open, but every loopback probe is silent. Read {total_samples_seen} samples from {} matching process{} with peak 0.000. Check Windows Volume Mixer for muted app audio or an unexpected output device; Bardic Chord will keep watching.",
+                    candidates.len(),
+                    plural_suffix(candidates.len())
+                )
+            } else if failed_probe_count > 0 {
+                format!(
+                    "`{capture_target}` is open, but {failed_probe_count} of {} loopback probe{} failed. Check `{}` for details; Bardic Chord will keep watching.",
+                    probe_results.len(),
+                    plural_suffix(failed_probe_count),
+                    log_path.display()
+                )
+            } else {
+                format!(
+                    "`{capture_target}` is open, but Bardic Chord does not hear app audio yet. Watching {} matching process{}.",
+                    candidates.len(),
+                    plural_suffix(candidates.len())
+                )
+            };
             if let Ok(mut pid) = target_pid.lock() {
                 *pid = None;
             }
             update_windows_capture_status(
                 &status,
                 WindowsCaptureStatus {
-                    message: format!(
-                        "`{capture_target}` is open, but Bardic Chord does not hear app audio yet. Watching {} matching process{}.",
-                        candidates.len(),
-                        plural_suffix(candidates.len())
-                    ),
+                    message,
                     target_pid: None,
                     candidate_count: candidates.len(),
                     audible_count: 0,
@@ -2579,6 +2611,7 @@ fn find_windows_target_process_candidates_sync(
 ) -> Result<Vec<WindowsProcessCandidate>, String> {
     let output = StdCommand::new("tasklist")
         .args(WINDOWS_TASKLIST_ARGS)
+        .creation_flags(CREATE_NO_WINDOW)
         .output()
         .map_err(|error| {
             format!("failed to run tasklist while looking for `{capture_target}`: {error}")
