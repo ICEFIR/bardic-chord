@@ -1073,6 +1073,20 @@ impl Backend {
         }
     }
 
+    pub async fn get_capture_session_options(&self) -> Vec<WindowsAudioSessionOption> {
+        #[cfg(target_os = "windows")]
+        {
+            tokio::task::spawn_blocking(windows_audio_session_options_for_report)
+                .await
+                .unwrap_or_default()
+        }
+
+        #[cfg(not(target_os = "windows"))]
+        {
+            Vec::new()
+        }
+    }
+
     pub async fn prepare_audio_output(
         &self,
         settings: Settings,
@@ -1860,28 +1874,21 @@ fn build_audio_output_report(
         started_at,
         message: message.into(),
         instruction_steps,
-        capture_session_options: windows_audio_session_options_for_report(),
+        capture_session_options: Vec::new(),
     }
 }
 
+#[cfg(target_os = "windows")]
 fn windows_audio_session_options_for_report() -> Vec<WindowsAudioSessionOption> {
-    #[cfg(target_os = "windows")]
-    {
-        match enumerate_windows_render_audio_sessions() {
-            Ok(sessions) => sessions,
-            Err(error) => {
-                warn!(
-                    ?error,
-                    "failed to enumerate Windows render audio sessions for the UI"
-                );
-                Vec::new()
-            }
+    match enumerate_windows_render_audio_sessions() {
+        Ok(sessions) => sessions,
+        Err(error) => {
+            warn!(
+                ?error,
+                "failed to enumerate Windows render audio sessions for the UI"
+            );
+            Vec::new()
         }
-    }
-
-    #[cfg(not(target_os = "windows"))]
-    {
-        Vec::new()
     }
 }
 

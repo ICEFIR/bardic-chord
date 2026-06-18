@@ -58,6 +58,7 @@ pub fn run() {
     if let Err(error) = init_logging() {
         eprintln!("failed to initialize Bardic Chord logging: {error}");
     } else {
+        install_panic_logging();
         info!("Bardic Chord startup");
     }
 
@@ -144,6 +145,36 @@ fn configure_desktop_identity() {
             );
         }
     }
+}
+
+fn install_panic_logging() {
+    std::panic::set_hook(Box::new(|panic_info| {
+        let location = panic_info
+            .location()
+            .map(|location| {
+                format!(
+                    "{}:{}:{}",
+                    location.file(),
+                    location.line(),
+                    location.column()
+                )
+            })
+            .unwrap_or_else(|| "unknown location".into());
+        let payload = panic_info
+            .payload()
+            .downcast_ref::<&str>()
+            .copied()
+            .or_else(|| {
+                panic_info
+                    .payload()
+                    .downcast_ref::<String>()
+                    .map(String::as_str)
+            })
+            .unwrap_or("non-string panic payload");
+
+        error!(%location, %payload, "Bardic Chord panic");
+        eprintln!("Bardic Chord panic at {location}: {payload}");
+    }));
 }
 
 #[cfg(target_os = "linux")]
@@ -786,11 +817,19 @@ fn start_status_poll(weak: slint::Weak<AppWindow>, backend: Arc<Backend>, runtim
             sleep(STATUS_POLL_INTERVAL).await;
 
             let audio_output = backend.get_audio_output_status().await;
+            let capture_sessions = backend.get_capture_session_options().await;
             let relay = backend.get_discord_relay_status().await;
             let party_can_stop = backend.can_stop_party().await;
 
             queue_ui(weak.clone(), move |ui| {
                 apply_audio_output_report(&ui, &audio_output);
+                if audio_output.capture_session_options.is_empty() {
+                    set_capture_session_models(
+                        &ui,
+                        &capture_sessions,
+                        ui.get_capture_target_pid() as u32,
+                    );
+                }
                 apply_relay_report(&ui, &relay);
                 ui.set_party_can_stop(party_can_stop);
                 refresh_runtime_summary(&ui);
