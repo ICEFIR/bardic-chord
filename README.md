@@ -64,7 +64,7 @@ flowchart LR
 3. Choose the Discord server and voice channel.
 4. Choose the desktop app you want Bardic Chord to capture.
 5. Prepare desktop audio.
-6. Route the app to the Bardic Chord output on Linux, or choose the active Windows audio session and let the watcher attach when the target app starts producing audio.
+6. Route the app to the Bardic Chord output on Linux, or choose the active Windows audio session. Windows detection keeps refreshing, but Bardic Chord keeps your chosen session until you pick another one.
 7. Start the party so Bardic Chord joins voice and forwards the local audio stream.
 
 ## Platform Status

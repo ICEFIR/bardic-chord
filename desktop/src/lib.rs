@@ -349,7 +349,6 @@ fn bind_callbacks(
     ui.on_draft_changed(move || {
         if let Some(ui) = weak.upgrade() {
             sync_discord_picker_ids(&ui);
-            sync_capture_session_target(&ui);
             normalize_ui_inputs(&ui);
             autosave_current_settings(&ui, &backend_clone);
             refresh_editor_derived(&ui);
@@ -366,6 +365,18 @@ fn bind_callbacks(
                     Duration::from_millis(800),
                     false,
                 );
+            }
+        }
+    });
+
+    let weak = ui.as_weak();
+    let backend_clone = backend.clone();
+    ui.on_capture_session_selected(move || {
+        if let Some(ui) = weak.upgrade() {
+            if sync_capture_session_target(&ui) {
+                normalize_ui_inputs(&ui);
+                autosave_current_settings(&ui, &backend_clone);
+                refresh_editor_derived(&ui);
             }
         }
     });
@@ -824,10 +835,12 @@ fn start_status_poll(weak: slint::Weak<AppWindow>, backend: Arc<Backend>, runtim
             queue_ui(weak.clone(), move |ui| {
                 apply_audio_output_report(&ui, &audio_output);
                 if audio_output.capture_session_options.is_empty() {
+                    let selected_target = ui.get_capture_target();
                     set_capture_session_models(
                         &ui,
                         &capture_sessions,
                         ui.get_capture_target_pid() as u32,
+                        selected_target.as_str(),
                     );
                 }
                 apply_relay_report(&ui, &relay);
@@ -994,10 +1007,12 @@ fn apply_discord_validation(ui: &AppWindow, report: &DiscordValidationReport) {
 
 fn apply_audio_output_report(ui: &AppWindow, report: &AudioOutputReport) {
     ui.set_audio_prepared(report.active);
+    let selected_target = ui.get_capture_target();
     set_capture_session_models(
         ui,
         &report.capture_session_options,
         ui.get_capture_target_pid() as u32,
+        selected_target.as_str(),
     );
     ui.set_audio_status_title(
         if report.active {
@@ -1190,70 +1205,109 @@ fn set_capture_session_models(
     ui: &AppWindow,
     sessions: &[WindowsAudioSessionOption],
     selected_pid: u32,
+    selected_target: &str,
 ) {
-    let labels = if sessions.is_empty() {
-        vec![SharedString::from("No Windows audio sessions detected")]
-    } else {
-        sessions
-            .iter()
-            .map(|session| SharedString::from(session.label.clone()))
-            .collect::<Vec<_>>()
-    };
-    let ids = if sessions.is_empty() {
-        vec![SharedString::default()]
-    } else {
-        sessions
-            .iter()
-            .map(|session| {
-                SharedString::from(format!(
-                    "{}|{}|{}",
-                    session.pid, session.process_name, session.display_name
-                ))
-            })
-            .collect::<Vec<_>>()
-    };
-
-    let selected_index = if selected_pid == 0 {
-        sessions
-            .iter()
-            .position(|session| session.audible)
-            .unwrap_or(0)
-    } else {
-        sessions
-            .iter()
-            .position(|session| session.pid == selected_pid)
-            .unwrap_or(0)
-    } as i32;
+    let model = capture_session_models(sessions, selected_pid, selected_target);
+    let labels = model
+        .labels
+        .into_iter()
+        .map(SharedString::from)
+        .collect::<Vec<_>>();
+    let ids = model
+        .ids
+        .into_iter()
+        .map(SharedString::from)
+        .collect::<Vec<_>>();
 
     ui.set_capture_session_model(ModelRc::new(VecModel::from(labels)));
     ui.set_capture_session_id_model(ModelRc::new(VecModel::from(ids)));
-    ui.set_capture_session_index(selected_index);
+    ui.set_capture_session_index(model.selected_index);
 }
 
-fn sync_capture_session_target(ui: &AppWindow) {
+struct CaptureSessionModels {
+    labels: Vec<String>,
+    ids: Vec<String>,
+    selected_index: i32,
+}
+
+fn capture_session_models(
+    sessions: &[WindowsAudioSessionOption],
+    selected_pid: u32,
+    selected_target: &str,
+) -> CaptureSessionModels {
+    let selected_target = non_empty(selected_target).unwrap_or(DEFAULT_CAPTURE_TARGET);
+    let mut labels = Vec::new();
+    let mut ids = Vec::new();
+    let mut selected_index = 0_i32;
+
+    if sessions.is_empty() {
+        labels.push("No Windows audio sessions detected".to_string());
+    } else {
+        labels.push("Choose a Windows audio session".to_string());
+    }
+    ids.push(String::new());
+
+    if selected_pid != 0 {
+        if let Some(index) = sessions
+            .iter()
+            .position(|session| session.pid == selected_pid)
+        {
+            selected_index = index as i32 + 1;
+        } else {
+            labels.push(format!(
+                "Selected session not detected: {selected_target} pid {selected_pid}"
+            ));
+            ids.push(format!("{selected_pid}|{selected_target}|"));
+            selected_index = 1;
+        }
+    }
+
+    for session in sessions {
+        labels.push(session.label.clone());
+        ids.push(capture_session_id(session));
+    }
+
+    CaptureSessionModels {
+        labels,
+        ids,
+        selected_index,
+    }
+}
+
+fn capture_session_id(session: &WindowsAudioSessionOption) -> String {
+    format!(
+        "{}|{}|{}",
+        session.pid, session.process_name, session.display_name
+    )
+}
+
+fn sync_capture_session_target(ui: &AppWindow) -> bool {
     let index = ui.get_capture_session_index() as usize;
     let ids = ui.get_capture_session_id_model();
     let Some(id) = ids.row_data(index) else {
-        return;
+        return false;
     };
     let id = id.to_string();
     let mut parts = id.splitn(3, '|');
     let Some(pid) = parts.next().and_then(|value| value.parse::<u32>().ok()) else {
-        return;
+        return false;
     };
     if pid == 0 {
-        return;
+        return false;
     }
 
     let process_name = parts.next().unwrap_or_default().trim();
     let display_name = parts.next().unwrap_or_default().trim();
+    let target = non_empty(process_name)
+        .or_else(|| non_empty(display_name))
+        .unwrap_or(DEFAULT_CAPTURE_TARGET);
+    if ui.get_capture_target_pid() == pid as i32 {
+        return false;
+    }
+
     ui.set_capture_target_pid(pid as i32);
-    ui.set_capture_target(
-        non_empty(process_name)
-            .or_else(|| non_empty(display_name))
-            .unwrap_or(DEFAULT_CAPTURE_TARGET)
-            .into(),
-    );
+    ui.set_capture_target(target.into());
+    true
 }
 
 fn refresh_runtime_summary(ui: &AppWindow) {
@@ -1453,5 +1507,74 @@ mod tests {
             format_activity(&entries).as_str(),
             "Now - Setup\nDesktop audio prepared\n\nLater - Launch\nParty armed"
         );
+    }
+
+    #[test]
+    fn capture_session_models_do_not_auto_select_detected_audio() {
+        let sessions = vec![
+            windows_session(42, "chrome.exe", "Chrome", true),
+            windows_session(77, "spotify.exe", "Spotify", false),
+        ];
+
+        let model = capture_session_models(&sessions, 0, "spotify");
+
+        assert_eq!(model.selected_index, 0);
+        assert_eq!(model.labels[0], "Choose a Windows audio session");
+        assert_eq!(model.ids[0], "");
+        assert_eq!(model.ids[1], "42|chrome.exe|Chrome");
+        assert_eq!(model.ids[2], "77|spotify.exe|Spotify");
+    }
+
+    #[test]
+    fn capture_session_models_preserve_missing_selected_pid() {
+        let sessions = vec![windows_session(42, "chrome.exe", "Chrome", true)];
+
+        let model = capture_session_models(&sessions, 77, "spotify.exe");
+
+        assert_eq!(model.selected_index, 1);
+        assert_eq!(model.labels[0], "Choose a Windows audio session");
+        assert_eq!(
+            model.labels[1],
+            "Selected session not detected: spotify.exe pid 77"
+        );
+        assert_eq!(model.ids[0], "");
+        assert_eq!(model.ids[1], "77|spotify.exe|");
+        assert_eq!(model.ids[2], "42|chrome.exe|Chrome");
+    }
+
+    #[test]
+    fn capture_session_models_keep_detected_selected_pid() {
+        let sessions = vec![
+            windows_session(42, "chrome.exe", "Chrome", true),
+            windows_session(77, "spotify.exe", "Spotify", false),
+        ];
+
+        let model = capture_session_models(&sessions, 77, "spotify.exe");
+
+        assert_eq!(model.selected_index, 2);
+        assert_eq!(model.labels[0], "Choose a Windows audio session");
+        assert_eq!(model.labels[1], "chrome.exe pid 42");
+        assert_eq!(model.labels[2], "spotify.exe pid 77");
+        assert_eq!(model.ids[2], "77|spotify.exe|Spotify");
+    }
+
+    fn windows_session(
+        pid: u32,
+        process_name: &str,
+        display_name: &str,
+        audible: bool,
+    ) -> WindowsAudioSessionOption {
+        WindowsAudioSessionOption {
+            pid,
+            process_name: process_name.into(),
+            display_name: display_name.into(),
+            device_name: "Speakers".into(),
+            state: "active".into(),
+            peak: if audible { 0.5 } else { 0.0 },
+            volume: 1.0,
+            muted: false,
+            audible,
+            label: format!("{process_name} pid {pid}"),
+        }
     }
 }

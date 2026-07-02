@@ -120,6 +120,7 @@ export component AppWindow inherits Window {
     callback request-validate-discord();
     callback request-connect-discord();
     callback request-disconnect-discord();
+    callback capture-session-selected();
     callback request-prepare-audio();
     callback request-stop-audio();
     callback request-launch-party();
@@ -493,7 +494,7 @@ export component AppWindow inherits Window {
                                             ComboBox {
                                                 model: root.capture-session-model;
                                                 current-index <=> root.capture-session-index;
-                                                selected => { root.draft-changed(); }
+                                                selected => { root.capture-session-selected(); }
                                             }
                                         }
 
